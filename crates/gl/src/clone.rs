@@ -259,13 +259,8 @@ async fn recover_encrypted_blobs(
         Ok(r) if r.status().is_success() => r,
         _ => return Ok(vec![]),
     };
-    let body: serde_json::Value = resp.json().await.context("parsing encrypted-blobs")?;
-    let blobs = body
-        .get("blobs")
-        .and_then(|b| b.as_array())
-        .cloned()
-        .unwrap_or_default();
-    if blobs.is_empty() {
+    let body: EncryptedBlobsResponse = resp.json().await.context("parsing encrypted-blobs")?;
+    if body.blobs.is_empty() {
         return Ok(vec![]);
     }
 
@@ -283,10 +278,8 @@ async fn recover_encrypted_blobs(
     }
 
     let mut recovered = Vec::new();
-    for entry in blobs {
-        let Some(oid) = entry.get("oid").and_then(|o| o.as_str()) else {
-            continue;
-        };
+    for entry in body.blobs {
+        let oid = entry.oid.as_str();
         // Skip if already present locally.
         let present = Command::new("git")
             .args(["-C", dest_str, "cat-file", "-e", oid])
@@ -335,6 +328,21 @@ async fn recover_encrypted_blobs(
     Ok(recovered)
 }
 
+/// One entry in the node's `/encrypted-blobs` response. Only `oid` is needed for
+/// recovery (the envelope is fetched per-oid and authorization is enforced by
+/// whether `open_blob` can decrypt). Parsed as a typed struct so schema drift on
+/// the endpoint surfaces as an error rather than silently recovering nothing.
+#[derive(Deserialize)]
+struct EncryptedBlobRef {
+    oid: String,
+}
+
+/// The node's `/encrypted-blobs` response body.
+#[derive(Deserialize)]
+struct EncryptedBlobsResponse {
+    blobs: Vec<EncryptedBlobRef>,
+}
+
 /// One blob entry in an Arweave-anchored encrypted manifest. The manifest also
 /// carries a `recipients` field per blob, but `gl` does not need it: authorization
 /// is enforced by whether `open_blob` can decrypt with the caller's key. Unknown
@@ -352,6 +360,22 @@ struct Manifest {
     timestamp: String,
     #[serde(default)]
     blobs: Vec<ManifestBlob>,
+}
+
+/// The `after` cursor for the next Arweave GraphQL page, or `None` when this is
+/// the last page (gateway reports no next page, or there is no edge to anchor a
+/// cursor). Keeps manifest discovery from truncating at the first 100 results.
+fn next_page_cursor(v: &serde_json::Value) -> Option<String> {
+    let txs = v.get("data")?.get("transactions")?;
+    if !txs.get("pageInfo")?.get("hasNextPage")?.as_bool()? {
+        return None;
+    }
+    txs.get("edges")?
+        .as_array()?
+        .last()?
+        .get("cursor")?
+        .as_str()
+        .map(String::from)
 }
 
 /// Extract transaction ids from an Arweave GraphQL `transactions` response.
@@ -424,23 +448,34 @@ async fn recover_from_arweave(
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
-    // 1. Discover manifest transaction ids via Arweave GraphQL.
-    let query = r#"query($repo:String!){transactions(tags:[{name:"App-Name",values:["gitlawb"]},{name:"Schema",values:["gitlawb/encrypted-manifest/v1"]},{name:"Repo",values:[$repo]}],first:100){edges{node{id}}}}"#;
-    let gql_body = serde_json::json!({ "query": query, "variables": { "repo": slug } });
-    let resp = match client
-        .post(format!("{ag}/graphql"))
-        .json(&gql_body)
-        .send()
-        .await
-    {
-        Ok(r) if r.status().is_success() => r,
-        _ => return Ok(vec![]),
-    };
-    let gql: serde_json::Value = match resp.json().await {
-        Ok(v) => v,
-        Err(_) => return Ok(vec![]),
-    };
-    let tx_ids = parse_tx_ids(&gql);
+    // 1. Discover manifest transaction ids via Arweave GraphQL, paginating with a
+    //    cursor until the gateway reports no further pages. Best-effort: on any
+    //    request/parse error, stop and merge whatever was collected so far.
+    let query = r#"query($repo:String!,$after:String){transactions(tags:[{name:"App-Name",values:["gitlawb"]},{name:"Schema",values:["gitlawb/encrypted-manifest/v1"]},{name:"Repo",values:[$repo]}],first:100,after:$after){pageInfo{hasNextPage}edges{cursor node{id}}}}"#;
+    let mut tx_ids: Vec<String> = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let gql_body =
+            serde_json::json!({ "query": query, "variables": { "repo": slug, "after": after } });
+        let resp = match client
+            .post(format!("{ag}/graphql"))
+            .json(&gql_body)
+            .send()
+            .await
+        {
+            Ok(r) if r.status().is_success() => r,
+            _ => break,
+        };
+        let gql: serde_json::Value = match resp.json().await {
+            Ok(v) => v,
+            Err(_) => break,
+        };
+        tx_ids.extend(parse_tx_ids(&gql));
+        match next_page_cursor(&gql) {
+            Some(c) => after = Some(c),
+            None => break,
+        }
+    }
     if tx_ids.is_empty() {
         return Ok(vec![]);
     }
@@ -801,6 +836,24 @@ mod tests {
         let v: serde_json::Value =
             serde_json::from_str(r#"{"data":{"transactions":{"edges":[]}}}"#).unwrap();
         assert!(parse_tx_ids(&v).is_empty());
+    }
+
+    #[test]
+    fn next_page_cursor_some_when_has_next() {
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"data":{"transactions":{"pageInfo":{"hasNextPage":true},"edges":[{"cursor":"C1","node":{"id":"TX1"}},{"cursor":"C2","node":{"id":"TX2"}}]}}}"#,
+        )
+        .unwrap();
+        assert_eq!(next_page_cursor(&v), Some("C2".to_string()));
+    }
+
+    #[test]
+    fn next_page_cursor_none_when_no_next() {
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"data":{"transactions":{"pageInfo":{"hasNextPage":false},"edges":[{"cursor":"C1","node":{"id":"TX1"}}]}}}"#,
+        )
+        .unwrap();
+        assert_eq!(next_page_cursor(&v), None);
     }
 
     #[test]
