@@ -78,7 +78,13 @@ pub async fn cat(ipfs_api: &str, cid: &str) -> Result<Vec<u8>> {
         return Err(anyhow::anyhow!("IPFS not configured"));
     }
     let url = format!("{}/api/v0/cat?arg={}", ipfs_api.trim_end_matches('/'), cid);
-    let resp = reqwest::Client::new().post(&url).send().await?;
+    // Bound the request so a stalled Kubo node fails fast instead of hanging the
+    // caller (cat is on the fetch and peer-replication paths). 30s matches the
+    // per-gateway timeout on the gl read path.
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+    let resp = client.post(&url).send().await?;
     if !resp.status().is_success() {
         return Err(anyhow::anyhow!("ipfs cat {cid}: {}", resp.status()));
     }
