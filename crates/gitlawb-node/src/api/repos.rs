@@ -393,7 +393,13 @@ pub async fn git_upload_pack(
 
     // withheld_blob_oids walks every ref with blocking `git ls-tree`; keep that
     // off the async worker thread.
-    let withheld = {
+    // Only a path-scoped (non-"/") rule can withhold a blob. With no such rule,
+    // the per-ref `git ls-tree` walk can never withhold anything (a denying "/"
+    // rule already 404'd at the gate above), so skip it and serve the plain pack.
+    let has_path_scoped_rule = rules.iter().any(|r| r.path_glob != "/");
+    let withheld = if !has_path_scoped_rule {
+        std::collections::HashSet::new()
+    } else {
         let path = disk_path.clone();
         let rules = rules.clone();
         let owner_did = record.owner_did.clone();
