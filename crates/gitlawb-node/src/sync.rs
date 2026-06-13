@@ -41,7 +41,13 @@ enum MirrorMode {
 fn classify_mirror(withheld: Option<Vec<String>>) -> MirrorMode {
     match withheld {
         Some(globs) if !globs.is_empty() => MirrorMode::Promisor,
-        _ => MirrorMode::Plain,
+        // Origin confirmed there are no withheld paths: a full mirror is correct.
+        Some(_) => MirrorMode::Plain,
+        // Could not determine (404 / network / parse error). Do not downgrade to
+        // Plain: that clears any promisor config and refetches, which breaks a
+        // still-withholding mirror. Promisor is the safe default (it works against
+        // both plain and withholding origins); a later successful lookup corrects it.
+        None => MirrorMode::Promisor,
     }
 }
 
@@ -463,11 +469,13 @@ mod tests {
     }
 
     #[test]
-    fn classify_plain_when_lookup_failed() {
-        // None == 404 / network error / parse failure: attempt a plain mirror
-        // and let the git read endpoint fail-close a mode-A repo.
+    fn classify_promisor_when_lookup_failed() {
+        // None == 404 / network error / parse failure. Don't downgrade to Plain:
+        // that clears promisor config and refetches, breaking a still-withholding
+        // mirror. Promisor is the safe default against both plain and withholding
+        // origins; a later successful lookup reclassifies a genuinely-plain repo.
         let mode = classify_mirror(None);
-        assert!(matches!(mode, MirrorMode::Plain));
+        assert!(matches!(mode, MirrorMode::Promisor));
     }
 
     fn rb(oid: &str, cid: &str) -> ReplicaBlob {
