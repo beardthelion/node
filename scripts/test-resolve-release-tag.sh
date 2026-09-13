@@ -69,35 +69,50 @@ stub_bin="$test_tmp/stub-bin"
 mkdir -p "$stub_bin"
 cat > "$stub_bin/gh" <<'STUB'
 #!/usr/bin/env bash
-case "$1" in
-  api)
-    case "$2" in
-      */commits/*)
-        printf '%s\n' "0000000000000000000000000000000000000000"
-        ;;
-      */compare/*)
-        printf '%s\n' "${STUB_STATUS:?STUB_STATUS unset}"
-        ;;
-      */releases/tags/*)
-        # Emitted as base64(name) id uploader, matching the resolver's jq.
-        printf '%s 11 %s\n' \
-          "$(printf '%s' 'gitlawb-node-9.9.9-x86_64-unknown-linux-musl.tar.gz' | base64 -w0)" \
-          "${STUB_UPLOADERS:-github-actions[bot]}"
-        # STUB_EVIL_NAME simulates an attacker-crafted asset name carrying a
-        # fake uploader inside it; base64 keeps it a single first field and
-        # the real uploader stays in $3.
-        if [ "${STUB_EVIL_NAME:-0}" = "1" ]; then
-          printf '%s 999 collaborator\n' \
-            "$(printf '%s' 'gitlawb-node-9.9.9-x86_64-unknown-linux-musl.tar.gz 999 github-actions[bot]' | base64 -w0)"
-        fi
-        ;;
-    esac
-    ;;
-  release)
+# Match the full command line, not a path fragment: an unrecognized call exits
+# 1 and names itself on stderr, so a new or mistyped gh call site fails loudly
+# instead of receiving a silently stubbed answer.
+case "$*" in
+  "release view "*" --repo Gitlawb/node --json author,targetCommitish "*)
     [ "${STUB_RELEASE_EXISTS:-0}" = "1" ] || exit 1
     printf '%s %s\n' \
       "${STUB_RELEASE_AUTHOR:-github-actions[bot]}" \
       "${STUB_TARGET:-0000000000000000000000000000000000000000}"
+    ;;
+  "api repos/Gitlawb/node/releases/tags/"*" "*)
+    # Run the resolver's own -q expression through real jq on a fixture
+    # response, so a dropped `| @base64` emits raw names and STUB_EVIL_NAME
+    # shifts the positional fields exactly as it would in production.
+    expr=""
+    prev=""
+    for a in "$@"; do
+      if [ "$prev" = "-q" ]; then expr="$a"; fi
+      prev="$a"
+    done
+    fixture='{"assets":[{"name":"gitlawb-node-9.9.9-x86_64-unknown-linux-musl.tar.gz","id":11,"uploader":{"login":"'"${STUB_UPLOADERS:-github-actions[bot]}"'"}}'
+    # STUB_EVIL_NAME simulates an attacker-crafted asset name carrying a fake
+    # uploader inside it; base64 keeps it a single first field and the real
+    # uploader stays in $3, while a raw name lets the smuggled field through.
+    if [ "${STUB_EVIL_NAME:-0}" = "1" ]; then
+      fixture="$fixture"',{"name":"gitlawb-node-9.9.9-x86_64-unknown-linux-musl.tar.gz 999 github-actions[bot]","id":999,"uploader":{"login":"collaborator"}}'
+    fi
+    printf '%s\n' "$fixture"']}' | jq -r "$expr"
+    ;;
+  "api repos/Gitlawb/node/commits/refs/tags/"*" "*)
+    printf '%s\n' "0000000000000000000000000000000000000000"
+    ;;
+  "api repos/Gitlawb/node/commits/"*" "*)
+    # A bare tag name resolves through refs/heads before refs/tags. Return a
+    # different SHA so a resolver that dropped the refs/tags/ qualification
+    # reads the same-named branch's commit and the tag-moved check fires.
+    printf '%s\n' "1111111111111111111111111111111111111111"
+    ;;
+  "api repos/Gitlawb/node/compare/main..."*" "*)
+    printf '%s\n' "${STUB_STATUS:?STUB_STATUS unset}"
+    ;;
+  *)
+    printf 'unexpected gh call: %s\n' "$*" >&2
+    exit 1
     ;;
 esac
 STUB
@@ -113,7 +128,7 @@ run_resolver_ci() {
   STUB_TARGET="${6:-0000000000000000000000000000000000000000}" \
   STUB_EVIL_NAME="${STUB_EVIL_NAME:-0}" \
   GITHUB_OUTPUT="$test_tmp/prov-output" \
-    "$resolver" "$3" >/dev/null 2>&1
+    "$resolver" "$3" >"$test_tmp/prov-stdout" 2>"$test_tmp/prov-stderr"
 }
 
 if ! run_resolver_ci behind 1 v9.9.9; then
@@ -168,6 +183,19 @@ fi
 # stays in the third field once names are base64-encoded.
 if STUB_EVIL_NAME=1 run_resolver_ci behind 1 v9.9.9; then
   printf '%s\n' "provenance: crafted asset name unexpectedly passed" >&2
+  exit 1
+fi
+# The stub's contract is loud failure: a call it does not recognize must exit
+# non-zero and name the command line on stderr, so a resolver that gains a new
+# gh call cannot pass on a silently empty stubbed answer.
+if "$stub_bin/gh" api repos/Gitlawb/node/rate_limit >"$test_tmp/unexp-out" \
+    2>"$test_tmp/unexp-err"; then
+  printf '%s\n' "stub accepted an unrecognized gh call" >&2
+  exit 1
+fi
+if ! grep -qF 'unexpected gh call: api repos/Gitlawb/node/rate_limit' \
+    "$test_tmp/unexp-err"; then
+  printf '%s\n' "stub's unrecognized-call stderr did not name the command line" >&2
   exit 1
 fi
 
