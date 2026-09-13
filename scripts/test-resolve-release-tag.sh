@@ -307,16 +307,19 @@ job=docker-manifest
         run: |
           set -euo pipefail
           scripts/resolve-release-tag.sh "${DISPATCH_TAG:-$RELEASE_TAG}"
+          # ghcr requires a lowercase repository path, and unlike metadata-action,
+          # buildx's `--output name=` does no lowercasing — a mixed-case owner
+          # makes the digest push fail with "invalid reference format".
+          echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
 
 job=docker-manifest
       - name: Create and push multi-arch manifest
         id: manifest
         env:
           VERSION: ${{ steps.rel.outputs.version }}
+          IMAGE: ${{ steps.rel.outputs.image }}
         run: |
           set -euo pipefail
-          # ghcr requires a lowercase repository path.
-          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
           # The docker matrix pushes one digest per arch leg; anything else is
           # a broken set, not a smaller multi-arch image.
           count="$(find /tmp/digests -maxdepth 1 -type f | wc -l)"
@@ -351,11 +354,10 @@ job=docker-manifest
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         env:
           VERSION: ${{ steps.rel.outputs.version }}
+          IMAGE: ${{ steps.rel.outputs.image }}
           DIGESTS: ${{ steps.manifest.outputs.digests }}
         run: |
           set -euo pipefail
-          # ghcr requires a lowercase repository path.
-          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
           MAJOR_MINOR="${VERSION%.*}"
           # :latest and :X.Y track the newest release. Only a push to main
           # carries a release-please-cut version, and release-please versions
@@ -645,13 +647,14 @@ if ! cmp "$expected_resolver_steps" "$actual_resolver_steps"; then
 fi
 
 # The moving-tag freeze is a structural property of the whole workflow, so it
-# must be checked over EVERY step, not only the pinned set above: an
-# imagetools call carrying :latest or :$MAJOR_MINOR relocated into an unpinned
-# step would otherwise iterate zero pinned steps and pass vacuously. Exactly
-# one step may carry that call, and it must be gated on both the event and the
-# ref: the on.push.branches trigger sits outside every pin and assertion, so
-# an event-only gate would silently widen with it. No step may read the
-# retired packages/container endpoint at all.
+# must be checked over every step in `jobs:`, not only the pinned set above:
+# an imagetools call carrying :latest or :$MAJOR_MINOR relocated into an
+# unpinned step would otherwise iterate zero pinned steps and pass vacuously.
+# Exactly one step may carry that call (the step named "Move floating tags"),
+# and it must be gated on both the event and the ref: the on.push.branches
+# trigger sits outside every pin and assertion, so an event-only gate would
+# silently widen with it. No step may read the retired packages/container
+# endpoint at all.
 if ! awk '
   function flush(  has_call, has_guard) {
     if (!in_step) return
@@ -665,18 +668,20 @@ if ! awk '
     }
     if (step ~ /packages\/container/) endpoint++
   }
-  /^      - / { flush(); in_step = 1; step = $0 ORS; next }
-  in_step { step = step $0 ORS }
+  /^jobs:[[:space:]]*$/ { in_jobs = 1; next }
+  in_jobs && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { flush(); in_step = 0; next }
+  in_jobs && /^      - / { flush(); in_step = 1; step = $0 ORS; next }
+  in_jobs && in_step { step = step $0 ORS }
   END {
     flush()
     ok = 1
     if (calls != 1) {
-      printf "expected exactly one floating-tag imagetools step, found %d\n", \
+      printf "expected exactly one moving-tag imagetools step, found %d\n", \
         calls > "/dev/stderr"
       ok = 0
     }
     if (ungated) {
-      printf "%d floating-tag imagetools step(s) lack the push-to-main guard\n", \
+      printf "%d moving-tag imagetools step(s) lack the push-to-main guard\n", \
         ungated > "/dev/stderr"
       ok = 0
     }
@@ -795,8 +800,10 @@ if ! awk '
       m = substr(m, RSTART + RLENGTH)
     }
   }
-  /^      - / { flush(); in_step = 1; step = $0 ORS; next }
-  in_step { step = step $0 ORS }
+  /^jobs:[[:space:]]*$/ { in_jobs = 1; next }
+  in_jobs && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { flush(); in_step = 0; next }
+  in_jobs && /^      - / { flush(); in_step = 1; step = $0 ORS; next }
+  in_jobs && in_step { step = step $0 ORS }
   END { flush(); if (bad) exit 1 }
 ' "$release_workflow"; then
   exit 1
@@ -825,7 +832,8 @@ awk '
       }
     }
   }
-  /^  [A-Za-z0-9_-]+:[[:space:]]*$/ {
+  /^jobs:[[:space:]]*$/ { in_jobs = 1; next }
+  in_jobs && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ {
     flush()
     job = $0
     sub(/^  /, "", job)
@@ -833,8 +841,8 @@ awk '
     in_step = 0
     next
   }
-  /^      - / { flush(); in_step = 1; step = $0 ORS; next }
-  in_step { step = step $0 ORS }
+  in_jobs && /^      - / { flush(); in_step = 1; step = $0 ORS; next }
+  in_jobs && in_step { step = step $0 ORS }
   END {
     flush()
     for (i = 1; i <= nf; i++) {
