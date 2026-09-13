@@ -153,7 +153,7 @@ expected_resolver_steps="$test_tmp/expected-resolver-steps"
 # change to one of these reviewed blocks must be reflected here deliberately.
 awk '
   function emit_step() {
-    if (in_step && (is_rel || is_workflow_scripts_checkout || is_manifest || is_npm_publish || is_layin || is_tag_checkout)) {
+    if (in_step && (is_rel || is_workflow_scripts_checkout || is_manifest || is_npm_publish || is_layin || is_tag_checkout || is_regen)) {
       printf "job=%s\n%s", job, step
     }
     in_step = 0
@@ -163,6 +163,7 @@ awk '
     is_npm_publish = 0
     is_layin = 0
     is_tag_checkout = 0
+    is_regen = 0
     step = ""
   }
 
@@ -181,7 +182,8 @@ awk '
     is_manifest = ($0 ~ /^      - name:[[:space:]]*Create and push multi-arch manifest[[:space:]]*$/)
     is_npm_publish = ($0 ~ /^      - name:[[:space:]]*Publish[[:space:]]*$/)
     is_layin = ($0 ~ /^      - name:[[:space:]]*Lay in release binaries[[:space:]]*$/)
-    is_tag_checkout = ($0 ~ /^      - name:[[:space:]]*Checkout release tag[[:space:]]*$/)
+    is_tag_checkout = ($0 ~ /^      - name:[[:space:]]*Checkout release tag[[:space:]]*$/ || $0 ~ /^      - name:[[:space:]]*Checkout node \(release tag\)[[:space:]]*$/)
+    is_regen = ($0 ~ /^      - name:[[:space:]]*Regenerate formula[[:space:]]*$/)
     step = $0 ORS
     next
   }
@@ -198,6 +200,9 @@ awk '
   }
 ' "$release_workflow" > "$actual_resolver_steps"
 
+# The fixture embeds the formula step's own indented heredoc terminator;
+# inside this quoted heredoc it is data, not a directive to bash.
+# shellcheck disable=SC1039
 cat > "$expected_resolver_steps" <<'EOF'
 job=docker
       - name: Check out workflow scripts
@@ -314,10 +319,28 @@ job=docker-manifest
           docker buildx imagetools inspect "$IMAGE:$VERSION"
 
 job=release-binaries
+      - name: Check out workflow scripts
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+job=release-binaries
+      - name: Resolve release tag
+        id: rel
+        env:
+          RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          scripts/resolve-release-tag.sh "$RELEASE_TAG"
+
+job=release-binaries
       - name: Checkout release tag
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: refs/tags/${{ needs.release-please.outputs.tag_name }}
+          # Pin the commit the resolver verified; a tag ref re-resolved here
+          # could have been moved between resolve and checkout.
+          ref: ${{ steps.rel.outputs.tag_commit || format('refs/tags/{0}', steps.rel.outputs.tag) }}
           persist-credentials: false
 
 job=npm-publish
@@ -430,6 +453,134 @@ job=npm-publish
             echo "==> npm publish $name@$VERSION (dist-tag $dist_tag)"
             npm publish "npm/packages/$pkg" --provenance --access public --tag "$dist_tag"
           done
+
+job=homebrew-bump
+      - name: Check out workflow scripts
+        if: ${{ steps.guard.outputs.enabled == 'true' }}
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+job=homebrew-bump
+      - name: Resolve release tag
+        if: ${{ steps.guard.outputs.enabled == 'true' }}
+        id: rel
+        env:
+          RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          scripts/resolve-release-tag.sh "$RELEASE_TAG"
+
+job=homebrew-bump
+      - name: Regenerate formula
+        if: ${{ steps.guard.outputs.enabled == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.rel.outputs.version }}
+          TAG: ${{ steps.rel.outputs.tag }}
+          ASSETS: ${{ steps.rel.outputs.assets }}
+        run: |
+          set -euo pipefail
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+          mkdir -p _sums
+          # Hash the tarballs themselves, fetched by the asset id the resolver
+          # captured and uploader-checked. The *.sha256 sidecars are mutable
+          # release assets too; trusting them would trust the same surface.
+          sha() {
+            archive="gitlawb-node-${VERSION}-$1.tar.gz"
+            asset_id="$(printf '%s\n' "$ASSETS" | awk -v n="$archive" '$1 == n {print $2; exit}')"
+            if [ -z "$asset_id" ]; then
+              echo "::error::release $TAG has no asset $archive captured at resolve time"
+              exit 1
+            fi
+            gh api "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" \
+              -H 'Accept: application/octet-stream' > "_sums/$archive"
+            sha256sum "_sums/$archive" | awk '{print $1}'
+          }
+          SHA_MAC_ARM="$(sha aarch64-apple-darwin)"
+          SHA_MAC_X64="$(sha x86_64-apple-darwin)"
+          SHA_LNX_ARM="$(sha aarch64-unknown-linux-musl)"
+          SHA_LNX_X64="$(sha x86_64-unknown-linux-musl)"
+
+          mkdir -p tap/Formula
+          cat > tap/Formula/gl.rb <<EOF
+          class Gl < Formula
+            desc "Gitlawb CLI — decentralized git for AI agents and developers"
+            homepage "https://gitlawb.com"
+            version "${VERSION}"
+            license "MIT OR Apache-2.0"
+
+            on_macos do
+              on_arm do
+                url "${base}/gitlawb-node-${VERSION}-aarch64-apple-darwin.tar.gz"
+                sha256 "${SHA_MAC_ARM}"
+              end
+              on_intel do
+                url "${base}/gitlawb-node-${VERSION}-x86_64-apple-darwin.tar.gz"
+                sha256 "${SHA_MAC_X64}"
+              end
+            end
+
+            on_linux do
+              on_arm do
+                url "${base}/gitlawb-node-${VERSION}-aarch64-unknown-linux-musl.tar.gz"
+                sha256 "${SHA_LNX_ARM}"
+              end
+              on_intel do
+                url "${base}/gitlawb-node-${VERSION}-x86_64-unknown-linux-musl.tar.gz"
+                sha256 "${SHA_LNX_X64}"
+              end
+            end
+
+            def install
+              bin.install "gl"
+              bin.install "git-remote-gitlawb"
+            end
+
+            def caveats
+              <<~CAVEATS
+                oh-my-zsh's git plugin aliases gl='git pull', which shadows this
+                binary in interactive shells. If \`gl\` prints "fatal: not a git
+                repository", run:
+                  echo 'unalias gl 2>/dev/null' >> ~/.zshrc && source ~/.zshrc
+              CAVEATS
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/gl --version")
+            end
+          end
+          EOF
+
+job=web-sync
+      - name: Check out workflow scripts
+        if: ${{ steps.guard.outputs.enabled == 'true' }}
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+job=web-sync
+      - name: Resolve release tag
+        if: ${{ steps.guard.outputs.enabled == 'true' }}
+        id: rel
+        env:
+          RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          scripts/resolve-release-tag.sh "$RELEASE_TAG"
+
+job=web-sync
+      - name: Checkout node (release tag)
+        if: ${{ steps.guard.outputs.enabled == 'true' }}
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # Pin the commit the resolver verified; a tag ref re-resolved here
+          # could have been moved between resolve and checkout.
+          ref: ${{ steps.rel.outputs.tag_commit || format('refs/tags/{0}', steps.rel.outputs.tag) }}
+          path: node
+          persist-credentials: false
 
 EOF
 

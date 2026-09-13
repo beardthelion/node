@@ -460,10 +460,26 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
     steps:
+      - name: Check out workflow scripts
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Resolve release tag
+        id: rel
+        env:
+          RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          scripts/resolve-release-tag.sh "$RELEASE_TAG"
+
       - name: Checkout release tag
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: refs/tags/${{ needs.release-please.outputs.tag_name }}
+          # Pin the commit the resolver verified; a tag ref re-resolved here
+          # could have been moved between resolve and checkout.
+          ref: ${{ steps.rel.outputs.tag_commit || format('refs/tags/{0}', steps.rel.outputs.tag) }}
           persist-credentials: false
 
       - name: Set up Rust toolchain
@@ -757,6 +773,22 @@ jobs:
             echo "enabled=true" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Check out workflow scripts
+        if: ${{ steps.guard.outputs.enabled == 'true' }}
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Resolve release tag
+        if: ${{ steps.guard.outputs.enabled == 'true' }}
+        id: rel
+        env:
+          RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          scripts/resolve-release-tag.sh "$RELEASE_TAG"
+
       - name: Checkout tap repo
         if: ${{ steps.guard.outputs.enabled == 'true' }}
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -770,15 +802,27 @@ jobs:
         if: ${{ steps.guard.outputs.enabled == 'true' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ needs.release-please.outputs.version }}
-          TAG: ${{ needs.release-please.outputs.tag_name }}
+          VERSION: ${{ steps.rel.outputs.version }}
+          TAG: ${{ steps.rel.outputs.tag }}
+          ASSETS: ${{ steps.rel.outputs.assets }}
         run: |
           set -euo pipefail
           base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
           mkdir -p _sums
-          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
-            --pattern '*.tar.gz.sha256' --dir _sums --clobber
-          sha() { awk '{print $1}' "_sums/gitlawb-node-${VERSION}-$1.tar.gz.sha256"; }
+          # Hash the tarballs themselves, fetched by the asset id the resolver
+          # captured and uploader-checked. The *.sha256 sidecars are mutable
+          # release assets too; trusting them would trust the same surface.
+          sha() {
+            archive="gitlawb-node-${VERSION}-$1.tar.gz"
+            asset_id="$(printf '%s\n' "$ASSETS" | awk -v n="$archive" '$1 == n {print $2; exit}')"
+            if [ -z "$asset_id" ]; then
+              echo "::error::release $TAG has no asset $archive captured at resolve time"
+              exit 1
+            fi
+            gh api "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" \
+              -H 'Accept: application/octet-stream' > "_sums/$archive"
+            sha256sum "_sums/$archive" | awk '{print $1}'
+          }
           SHA_MAC_ARM="$(sha aarch64-apple-darwin)"
           SHA_MAC_X64="$(sha x86_64-apple-darwin)"
           SHA_LNX_ARM="$(sha aarch64-unknown-linux-musl)"
@@ -875,11 +919,29 @@ jobs:
             echo "enabled=true" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Check out workflow scripts
+        if: ${{ steps.guard.outputs.enabled == 'true' }}
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Resolve release tag
+        if: ${{ steps.guard.outputs.enabled == 'true' }}
+        id: rel
+        env:
+          RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          scripts/resolve-release-tag.sh "$RELEASE_TAG"
+
       - name: Checkout node (release tag)
         if: ${{ steps.guard.outputs.enabled == 'true' }}
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: refs/tags/${{ needs.release-please.outputs.tag_name }}
+          # Pin the commit the resolver verified; a tag ref re-resolved here
+          # could have been moved between resolve and checkout.
+          ref: ${{ steps.rel.outputs.tag_commit || format('refs/tags/{0}', steps.rel.outputs.tag) }}
           path: node
           persist-credentials: false
 
