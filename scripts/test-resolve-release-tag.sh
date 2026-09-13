@@ -381,6 +381,7 @@ job=docker-manifest
           VERSION: ${{ steps.rel.outputs.version }}
           IMAGE: ${{ steps.rel.outputs.image }}
           DIGESTS: ${{ steps.manifest.outputs.digests }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           MAJOR_MINOR="${VERSION%.*}"
@@ -391,6 +392,24 @@ job=docker-manifest
           # never move a pointer, so this step skips on dispatch. After a
           # backfill that is genuinely newest in its minor line, advance :X.Y
           # by hand: docker buildx imagetools create -t "$IMAGE:X.Y" <digests>.
+          # The event gate alone does not bound a stale run: re-running an
+          # older push run replays its stored needs outputs under the
+          # original event and ref, and would move the pointers backward to
+          # that run's version. Floor against live state instead: this run's
+          # release already exists by now, so VERSION must be the newest
+          # published release or the run is stale and the tags stay put.
+          floor="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" -q '
+            [ .[] | select(.draft == false) | .tag_name
+              | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))
+              | ltrimstr("v") | split(".") | map(tonumber) ]
+            | if length == 0 then "" else max | join(".") end')" || {
+            echo "::error::could not list releases to bound the moving tags"
+            exit 1
+          }
+          if [ -n "$floor" ] && [ "$floor" != "$VERSION" ]; then
+            echo "::error::release v$floor is newer than this run's v$VERSION; refusing to move the moving tags backward (stale re-run?)"
+            exit 1
+          fi
           # shellcheck disable=SC2086
           docker buildx imagetools create -t "$IMAGE:latest" -t "$IMAGE:$MAJOR_MINOR" $DIGESTS
 
@@ -686,8 +705,11 @@ fi
 # tags"), gated on both the event and the ref. Matching on code text with
 # comments stripped keeps a comment quoting either pattern from counting.
 # The guard must sit on the step's if: line as a single && condition, so an
-# ||-weakened or comment-borne condition cannot satisfy it. No step may read
-# the retired packages/container endpoint at all.
+# ||-weakened or comment-borne condition cannot satisfy it. The carrier must
+# also bound the move against live state: a re-run of an older push run
+# replays stored outputs under the original event and ref, so the step must
+# read the releases list and refuse (exit 1) rather than move the tags
+# backward. No step may read the retired packages/container endpoint at all.
 if ! awk '
   function decomment(s,   n, L, i, j, c, q, line, out) {
     n = split(s, L, "\n")
@@ -705,7 +727,7 @@ if ! awk '
     }
     return out
   }
-  function flush(  code, has_call, has_guard, k, K) {
+  function flush(  code, has_call, has_guard, has_floor, k, K) {
     if (!in_step) return
     code = decomment(step)
     has_call = (code ~ /imagetools[ \t]+create|docker[ \t]+push|docker[ \t]+buildx[ \t]+build|crane[ \t]|regctl[ \t]|skopeo[ \t]|oras[ \t]|tags:/ \
@@ -718,9 +740,12 @@ if ! awk '
         has_guard = 1
       }
     }
+    has_floor = (code ~ /releases[?\/]/ && code ~ /::error::/ \
+      && code ~ /exit[ \t]+1/)
     if (has_call) {
       calls++
       if (!has_guard) ungated++
+      if (!has_floor) unfloored++
     }
     if (code ~ /packages\/container/) endpoint++
   }
@@ -739,6 +764,11 @@ if ! awk '
     if (ungated) {
       printf "%d moving-tag publish step(s) lack the push-to-main guard\n", \
         ungated > "/dev/stderr"
+      ok = 0
+    }
+    if (unfloored) {
+      printf "%d moving-tag publish step(s) lack the live release floor\n", \
+        unfloored > "/dev/stderr"
       ok = 0
     }
     if (endpoint) {
