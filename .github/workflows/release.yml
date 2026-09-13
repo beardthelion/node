@@ -343,7 +343,7 @@ jobs:
           set -euo pipefail
           scripts/resolve-release-tag.sh "${DISPATCH_TAG:-$RELEASE_TAG}"
           # ghcr requires a lowercase repository path, and unlike metadata-action,
-          # buildx's `--output name=` does no lowercasing — a mixed-case owner
+          # buildx's `--output name=` does no lowercasing, so a mixed-case owner
           # makes the digest push fail with "invalid reference format".
           echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
 
@@ -832,8 +832,12 @@ jobs:
               echo "::error::release $TAG has no asset $archive captured at resolve time" >&2
               exit 1
             fi
+            # errexit is off inside the $(...) this runs under, so a failed
+            # download must exit the function itself instead of hashing a
+            # truncated file.
             gh api "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" \
-              -H 'Accept: application/octet-stream' > "_sums/$archive"
+              -H 'Accept: application/octet-stream' > "_sums/$archive" \
+              || exit 1
             sha256sum "_sums/$archive" | awk '{print $1}'
           }
           SHA_MAC_ARM="$(sha aarch64-apple-darwin)"
