@@ -341,6 +341,7 @@ job=release-binaries
         env:
           RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash # matrix includes windows-latest, where run: defaults to pwsh
         run: |
           set -euo pipefail
           scripts/resolve-release-tag.sh "$RELEASE_TAG"
