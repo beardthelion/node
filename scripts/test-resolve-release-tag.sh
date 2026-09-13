@@ -43,7 +43,14 @@ for invalid_tag in \
   "vlatest" \
   "v" \
   "v1.2.3/../../x" \
-  "V1.2.3"
+  "V1.2.3" \
+  "v1atest" \
+  "v1.2.3.4.5" \
+  "v1_x" \
+  "v1-any-branch-name" \
+  "v1" \
+  "v1.2." \
+  "v1..3"
 do
   : > "$invalid_output"
   if GITHUB_OUTPUT="$invalid_output" "$resolver" "$invalid_tag"; then
@@ -159,5 +166,52 @@ if ! cmp "$expected_resolver_steps" "$actual_resolver_steps"; then
   diff -u "$expected_resolver_steps" "$actual_resolver_steps" >&2 || true
   exit 1
 fi
+
+# Every job that publishes to an external registry must declare the protected
+# environment that gates it. workflow_dispatch runs the selected ref's YAML, so
+# the environment's deployment-branch rule is the control that keeps a dispatch
+# from a non-main ref out of npm and ghcr.
+actual_job_environments="$test_tmp/actual-job-environments"
+awk '
+  /^  [A-Za-z0-9_-]+:[[:space:]]*$/ {
+    job = $0
+    sub(/^  /, "", job)
+    sub(/:[[:space:]]*$/, "", job)
+  }
+  /^    environment:[[:space:]]*/ {
+    env = $0
+    sub(/^    environment:[[:space:]]*/, "", env)
+    gsub(/[[:space:]]/, "", env)
+    print job "=" env
+  }
+' "$release_workflow" > "$actual_job_environments"
+
+expected_job_environments="$test_tmp/expected-job-environments"
+cat > "$expected_job_environments" <<'EOF'
+docker=release
+docker-manifest=release
+npm-publish=release
+EOF
+
+if ! cmp "$expected_job_environments" "$actual_job_environments"; then
+  printf '%s\n' \
+    "release workflow publish jobs differ on their environment gate" >&2
+  diff -u "$expected_job_environments" "$actual_job_environments" >&2 || true
+  exit 1
+fi
+
+# The OIDC publish path must run on an exact npm version, not a range. A range
+# operator resolves to whatever the registry serves that day, which is the same
+# mutable-dependency shape the action pins exist to prevent.
+npm_install_specs="$test_tmp/npm-install-specs"
+grep -o 'npm install -g npm@[^ "]*' "$release_workflow" | sort -u \
+  > "$npm_install_specs"
+while IFS= read -r spec; do
+  if ! grep -qE '^npm install -g npm@[0-9]+\.[0-9]+\.[0-9]+$' <<<"$spec"; then
+    printf '%s\n' \
+      "npm install spec is not an exact pinned version: $spec" >&2
+    exit 1
+  fi
+done < "$npm_install_specs"
 
 printf '%s\n' "release tag validation tests passed"
