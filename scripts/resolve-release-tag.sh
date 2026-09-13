@@ -29,11 +29,14 @@ esac
 # pointing at a commit main already contains. Otherwise a write-access user
 # could plant a v99.99.99 tag on unreviewed content and backfill-publish it.
 if [ -n "${GH_TOKEN:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ]; then
-  release_author="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
-    --json author -q .author.login 2>/dev/null)" || {
+  release_meta="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
+    --json author,targetCommitish -q '.author.login + " " + .targetCommitish' \
+    2>/dev/null)" || {
     printf '%s\n' "::error::no GitHub release exists for tag $tag"
     exit 1
   }
+  release_author="${release_meta%% *}"
+  release_target="${release_meta##* }"
   # A hand-created release on a valid tag does not qualify. Not a hard bound
   # (a workflow run can mint a bot-authored release), but it removes the
   # cheapest path to publishing attacker-uploaded release assets.
@@ -64,6 +67,12 @@ if [ -n "${GH_TOKEN:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ]; then
   # The SHA is emitted so checkouts pin the verified commit instead of
   # re-resolving a tag that could be moved between resolve and checkout.
   tag_commit="$(gh api "repos/$GITHUB_REPOSITORY/commits/refs/tags/$tag" -q .sha)"
+  # The tag must still point at the commit the release was created against.
+  # Reachable-from-main alone accepts a tag moved to any other main commit.
+  if [ "$tag_commit" != "$release_target" ]; then
+    printf '%s\n' "::error::tag $tag points at $tag_commit but release $tag was created against $release_target (tag moved)"
+    exit 1
+  fi
   status="$(gh api "repos/$GITHUB_REPOSITORY/compare/main...$tag_commit" -q .status)"
   case "$status" in
     identical|behind) ;;

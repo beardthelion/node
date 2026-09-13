@@ -86,7 +86,9 @@ case "$1" in
     ;;
   release)
     [ "${STUB_RELEASE_EXISTS:-0}" = "1" ] || exit 1
-    printf '%s\n' "${STUB_RELEASE_AUTHOR:-github-actions[bot]}"
+    printf '%s %s\n' \
+      "${STUB_RELEASE_AUTHOR:-github-actions[bot]}" \
+      "${STUB_TARGET:-0000000000000000000000000000000000000000}"
     ;;
 esac
 STUB
@@ -99,6 +101,7 @@ run_resolver_ci() {
   STUB_STATUS="$1" STUB_RELEASE_EXISTS="$2" \
   STUB_RELEASE_AUTHOR="${4:-github-actions[bot]}" \
   STUB_UPLOADERS="${5:-github-actions[bot]}" \
+  STUB_TARGET="${6:-0000000000000000000000000000000000000000}" \
   GITHUB_OUTPUT="$test_tmp/prov-output" \
     "$resolver" "$3" >/dev/null 2>&1
 }
@@ -141,6 +144,14 @@ if run_resolver_ci behind 1 v9.9.9 collaborator; then
 fi
 if run_resolver_ci behind 1 v9.9.9 "github-actions[bot]" collaborator; then
   printf '%s\n' "provenance: release with collaborator-uploaded assets unexpectedly passed" >&2
+  exit 1
+fi
+# A tag moved to a different main commit: compare would say behind, but the
+# tag no longer matches the commit the release was created against.
+if run_resolver_ci behind 1 v9.9.9 \
+    "github-actions[bot]" "github-actions[bot]" \
+    aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; then
+  printf '%s\n' "provenance: moved tag unexpectedly passed" >&2
   exit 1
 fi
 
