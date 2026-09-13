@@ -238,7 +238,7 @@ jobs:
       - name: Checkout release tag
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ steps.rel.outputs.tag }}
+          ref: refs/tags/${{ steps.rel.outputs.tag }}
           persist-credentials: false
 
       - name: Set up Docker Buildx
@@ -349,21 +349,51 @@ jobs:
       - name: Create and push multi-arch manifest
         env:
           VERSION: ${{ steps.rel.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           # ghcr requires a lowercase repository path.
           IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
           MAJOR_MINOR="${VERSION%.*}"
+          # The docker matrix pushes one digest per arch leg; anything else is
+          # a broken set, not a smaller multi-arch image.
+          count="$(find /tmp/digests -maxdepth 1 -type f | wc -l)"
+          if [ "$count" -ne 2 ]; then
+            echo "::error::expected 2 arch digests in /tmp/digests, found $count"
+            exit 1
+          fi
           digests=""
           for f in /tmp/digests/*; do
-            digests="$digests $IMAGE@sha256:$(basename "$f")"
+            d="$(basename "$f")"
+            case "$d" in
+              *[!0-9a-f]*)
+                echo "::error::digest filename is not lowercase sha256 hex: $d"
+                exit 1
+                ;;
+            esac
+            if [ "${#d}" -ne 64 ]; then
+              echo "::error::digest is not 64 hex chars: $d"
+              exit 1
+            fi
+            digests="$digests $IMAGE@sha256:$d"
           done
+          # The immutable tag always publishes. The moving tags only advance:
+          # a backfill of anything but the newest release leaves :latest and
+          # :X.Y pointing at the newer image.
           # shellcheck disable=SC2086
-          docker buildx imagetools create \
-            -t "$IMAGE:$VERSION" \
-            -t "$IMAGE:$MAJOR_MINOR" \
-            -t "$IMAGE:latest" \
-            $digests
+          docker buildx imagetools create -t "$IMAGE:$VERSION" $digests
+          latest_tag="$(gh release view --json tagName -q .tagName)"
+          latest_version="${latest_tag#v}"
+          newest="$(printf '%s\n%s\n' "$latest_version" "$VERSION" | sort -V | tail -1)"
+          if [ "$newest" = "$VERSION" ]; then
+            # shellcheck disable=SC2086
+            docker buildx imagetools create \
+              -t "$IMAGE:$MAJOR_MINOR" \
+              -t "$IMAGE:latest" \
+              $digests
+          else
+            echo "::notice::$VERSION is older than $latest_tag; not moving :$MAJOR_MINOR or :latest"
+          fi
           docker buildx imagetools inspect "$IMAGE:$VERSION"
 
       - name: Release summary
@@ -410,7 +440,7 @@ jobs:
       - name: Checkout release tag
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ needs.release-please.outputs.tag_name }}
+          ref: refs/tags/${{ needs.release-please.outputs.tag_name }}
           persist-credentials: false
 
       - name: Set up Rust toolchain
@@ -561,7 +591,7 @@ jobs:
       - name: Checkout release tag
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ steps.rel.outputs.tag }}
+          ref: refs/tags/${{ steps.rel.outputs.tag }}
           persist-credentials: false
 
       # npm >= 11.5.1 performs the OIDC token exchange automatically when the
@@ -638,14 +668,24 @@ jobs:
           # Platform packages first, then the wrapper (so its optionalDependencies resolve).
           # Skip versions already on the registry so a rerun after a partial publish
           # is idempotent instead of erroring on the first existing package.
+          # npm publish moves the latest dist-tag to whatever it publishes, so a
+          # backfilled older version would hand :latest to stale code. Publish
+          # those under the backfill dist-tag instead.
+          registry_latest="$(npm view @gitlawb/gl dist-tags.latest 2>/dev/null || true)"
+          dist_tag="latest"
+          if [ -n "$registry_latest" ] && \
+             [ "$VERSION" != "$(printf '%s\n%s\n' "$registry_latest" "$VERSION" | sort -V | tail -1)" ]; then
+            dist_tag="backfill"
+            echo "::notice::$VERSION is older than registry latest $registry_latest; publishing under dist-tag backfill"
+          fi
           for pkg in gl-darwin-arm64 gl-darwin-x64 gl-linux-arm64 gl-linux-x64 gl; do
             name="@gitlawb/$pkg"
             if npm view "$name@$VERSION" version >/dev/null 2>&1; then
               echo "==> $name@$VERSION already published, skipping"
               continue
             fi
-            echo "==> npm publish $name@$VERSION"
-            npm publish "npm/packages/$pkg" --provenance --access public
+            echo "==> npm publish $name@$VERSION (dist-tag $dist_tag)"
+            npm publish "npm/packages/$pkg" --provenance --access public --tag "$dist_tag"
           done
 
   homebrew-bump:
@@ -789,7 +829,7 @@ jobs:
         if: ${{ steps.guard.outputs.enabled == 'true' }}
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ needs.release-please.outputs.tag_name }}
+          ref: refs/tags/${{ needs.release-please.outputs.tag_name }}
           path: node
           persist-credentials: false
 

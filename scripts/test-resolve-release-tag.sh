@@ -64,16 +64,19 @@ release_workflow="$repo_root/.github/workflows/release.yml"
 actual_resolver_steps="$test_tmp/actual-resolver-steps"
 expected_resolver_steps="$test_tmp/expected-resolver-steps"
 
-# Pin each resolver step and the checkout step that supplies its script. Any
-# change to one of these reviewed blocks must be reflected here deliberately.
+# Pin each resolver step, the checkout step that supplies its script, and the
+# two steps that publish to an external registry. Any change to one of these
+# reviewed blocks must be reflected here deliberately.
 awk '
   function emit_step() {
-    if (in_step && (is_rel || is_workflow_scripts_checkout)) {
+    if (in_step && (is_rel || is_workflow_scripts_checkout || is_manifest || is_npm_publish)) {
       printf "job=%s\n%s", job, step
     }
     in_step = 0
     is_rel = 0
     is_workflow_scripts_checkout = 0
+    is_manifest = 0
+    is_npm_publish = 0
     step = ""
   }
 
@@ -89,6 +92,8 @@ awk '
     emit_step()
     in_step = 1
     is_workflow_scripts_checkout = ($0 ~ /^      - name:[[:space:]]*Check out workflow scripts[[:space:]]*$/)
+    is_manifest = ($0 ~ /^      - name:[[:space:]]*Create and push multi-arch manifest[[:space:]]*$/)
+    is_npm_publish = ($0 ~ /^      - name:[[:space:]]*Publish[[:space:]]*$/)
     step = $0 ORS
     next
   }
@@ -142,6 +147,57 @@ job=docker-manifest
           set -euo pipefail
           scripts/resolve-release-tag.sh "${DISPATCH_TAG:-$RELEASE_TAG}"
 
+job=docker-manifest
+      - name: Create and push multi-arch manifest
+        env:
+          VERSION: ${{ steps.rel.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # ghcr requires a lowercase repository path.
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
+          MAJOR_MINOR="${VERSION%.*}"
+          # The docker matrix pushes one digest per arch leg; anything else is
+          # a broken set, not a smaller multi-arch image.
+          count="$(find /tmp/digests -maxdepth 1 -type f | wc -l)"
+          if [ "$count" -ne 2 ]; then
+            echo "::error::expected 2 arch digests in /tmp/digests, found $count"
+            exit 1
+          fi
+          digests=""
+          for f in /tmp/digests/*; do
+            d="$(basename "$f")"
+            case "$d" in
+              *[!0-9a-f]*)
+                echo "::error::digest filename is not lowercase sha256 hex: $d"
+                exit 1
+                ;;
+            esac
+            if [ "${#d}" -ne 64 ]; then
+              echo "::error::digest is not 64 hex chars: $d"
+              exit 1
+            fi
+            digests="$digests $IMAGE@sha256:$d"
+          done
+          # The immutable tag always publishes. The moving tags only advance:
+          # a backfill of anything but the newest release leaves :latest and
+          # :X.Y pointing at the newer image.
+          # shellcheck disable=SC2086
+          docker buildx imagetools create -t "$IMAGE:$VERSION" $digests
+          latest_tag="$(gh release view --json tagName -q .tagName)"
+          latest_version="${latest_tag#v}"
+          newest="$(printf '%s\n%s\n' "$latest_version" "$VERSION" | sort -V | tail -1)"
+          if [ "$newest" = "$VERSION" ]; then
+            # shellcheck disable=SC2086
+            docker buildx imagetools create \
+              -t "$IMAGE:$MAJOR_MINOR" \
+              -t "$IMAGE:latest" \
+              $digests
+          else
+            echo "::notice::$VERSION is older than $latest_tag; not moving :$MAJOR_MINOR or :latest"
+          fi
+          docker buildx imagetools inspect "$IMAGE:$VERSION"
+
 job=npm-publish
       - name: Check out workflow scripts
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -157,6 +213,37 @@ job=npm-publish
         run: |
           set -euo pipefail
           scripts/resolve-release-tag.sh "${DISPATCH_TAG:-$RELEASE_TAG}"
+
+job=npm-publish
+      - name: Publish
+        env:
+          VERSION: ${{ steps.rel.outputs.version }}
+        run: |
+          set -euo pipefail
+          # No token: npm exchanges this job's GitHub OIDC identity with the
+          # registry (trusted publishing); provenance is attested automatically.
+          # Platform packages first, then the wrapper (so its optionalDependencies resolve).
+          # Skip versions already on the registry so a rerun after a partial publish
+          # is idempotent instead of erroring on the first existing package.
+          # npm publish moves the latest dist-tag to whatever it publishes, so a
+          # backfilled older version would hand :latest to stale code. Publish
+          # those under the backfill dist-tag instead.
+          registry_latest="$(npm view @gitlawb/gl dist-tags.latest 2>/dev/null || true)"
+          dist_tag="latest"
+          if [ -n "$registry_latest" ] && \
+             [ "$VERSION" != "$(printf '%s\n%s\n' "$registry_latest" "$VERSION" | sort -V | tail -1)" ]; then
+            dist_tag="backfill"
+            echo "::notice::$VERSION is older than registry latest $registry_latest; publishing under dist-tag backfill"
+          fi
+          for pkg in gl-darwin-arm64 gl-darwin-x64 gl-linux-arm64 gl-linux-x64 gl; do
+            name="@gitlawb/$pkg"
+            if npm view "$name@$VERSION" version >/dev/null 2>&1; then
+              echo "==> $name@$VERSION already published, skipping"
+              continue
+            fi
+            echo "==> npm publish $name@$VERSION (dist-tag $dist_tag)"
+            npm publish "npm/packages/$pkg" --provenance --access public --tag "$dist_tag"
+          done
 
 EOF
 
@@ -197,6 +284,16 @@ if ! cmp "$expected_job_environments" "$actual_job_environments"; then
   printf '%s\n' \
     "release workflow publish jobs differ on their environment gate" >&2
   diff -u "$expected_job_environments" "$actual_job_environments" >&2 || true
+  exit 1
+fi
+
+# Every checkout of a release tag must qualify the ref as refs/tags/... :
+# actions/checkout resolves an unqualified ref as a branch before a tag, so a
+# same-named branch would shadow the release tag and the release would build
+# from unreviewed branch content.
+if grep -nE 'ref:[[:space:]]*\$\{\{[^}]*tag[^}]*\}\}' "$release_workflow" \
+  | grep -v 'refs/tags/'; then
+  printf '%s\n' "unqualified release-tag checkout ref (branch shadows tag)" >&2
   exit 1
 fi
 
