@@ -29,8 +29,16 @@ esac
 # pointing at a commit main already contains. Otherwise a write-access user
 # could plant a v99.99.99 tag on unreviewed content and backfill-publish it.
 if [ -n "${GH_TOKEN:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ]; then
-  if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+  release_author="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
+    --json author -q .author.login 2>/dev/null)" || {
     printf '%s\n' "::error::no GitHub release exists for tag $tag"
+    exit 1
+  }
+  # A hand-created release on a valid tag does not qualify. Not a hard bound
+  # (a workflow run can mint a bot-authored release), but it removes the
+  # cheapest path to publishing attacker-uploaded release assets.
+  if [ "$release_author" != "github-actions[bot]" ]; then
+    printf '%s\n' "::error::release $tag was authored by $release_author, not the release automation"
     exit 1
   fi
   # Resolve through the fully-qualified tag ref to a commit SHA: an

@@ -81,7 +81,8 @@ case "$1" in
     esac
     ;;
   release)
-    [ "${STUB_RELEASE_EXISTS:-0}" = "1" ]
+    [ "${STUB_RELEASE_EXISTS:-0}" = "1" ] || exit 1
+    printf '%s\n' "${STUB_RELEASE_AUTHOR:-github-actions[bot]}"
     ;;
 esac
 STUB
@@ -92,6 +93,7 @@ run_resolver_ci() {
   GH_TOKEN=test-token \
   GITHUB_REPOSITORY=Gitlawb/node \
   STUB_STATUS="$1" STUB_RELEASE_EXISTS="$2" \
+  STUB_RELEASE_AUTHOR="${4:-github-actions[bot]}" \
   GITHUB_OUTPUT="$test_tmp/prov-output" \
     "$resolver" "$3" >/dev/null 2>&1
 }
@@ -112,6 +114,10 @@ for bad_status in ahead diverged; do
 done
 if run_resolver_ci behind 0 v9.9.9; then
   printf '%s\n' "provenance: tag with no GitHub release unexpectedly passed" >&2
+  exit 1
+fi
+if run_resolver_ci behind 1 v9.9.9 collaborator; then
+  printf '%s\n' "provenance: hand-created release unexpectedly passed" >&2
   exit 1
 fi
 
@@ -284,30 +290,31 @@ job=npm-publish
           # Skip versions already on the registry so a rerun after a partial publish
           # is idempotent instead of erroring on the first existing package.
           # npm publish moves the latest dist-tag to whatever it publishes, so a
-          # backfilled older version would hand :latest to stale code. Publish
-          # those under the backfill dist-tag instead.
-          # E404 means the package has never been published, so this release
-          # gets latest; any other lookup failure must fail closed rather than
-          # guess at the dist-tag and risk moving latest backward.
-          registry_latest="$(npm view @gitlawb/gl dist-tags.latest 2>&1)" || {
-            if ! grep -q E404 <<<"$registry_latest"; then
-              printf '%s\n' "$registry_latest" >&2
-              echo "::error::npm dist-tags lookup failed; not guessing the dist-tag"
-              exit 1
-            fi
-            registry_latest=""
-          }
-          dist_tag="latest"
-          if [ -n "$registry_latest" ] && \
-             [ "$VERSION" != "$(printf '%s\n%s\n' "$registry_latest" "$VERSION" | sort -V | tail -1)" ]; then
-            dist_tag="backfill"
-            echo "::notice::$VERSION is older than registry latest $registry_latest; publishing under dist-tag backfill"
-          fi
+          # backfilled older version would hand :latest to stale code. Decide
+          # the dist-tag per package from that package's own registry latest:
+          # a partial publish can leave the platform packages ahead of the
+          # wrapper. E404 means the package has never been published, so this
+          # release gets latest; any other lookup failure must fail closed
+          # rather than guess at the dist-tag and risk moving latest backward.
           for pkg in gl-darwin-arm64 gl-darwin-x64 gl-linux-arm64 gl-linux-x64 gl; do
             name="@gitlawb/$pkg"
             if npm view "$name@$VERSION" version >/dev/null 2>&1; then
               echo "==> $name@$VERSION already published, skipping"
               continue
+            fi
+            registry_latest="$(npm view "$name" dist-tags.latest 2>&1)" || {
+              if ! grep -q E404 <<<"$registry_latest"; then
+                printf '%s\n' "$registry_latest" >&2
+                echo "::error::npm dist-tags lookup failed for $name; not guessing the dist-tag"
+                exit 1
+              fi
+              registry_latest=""
+            }
+            dist_tag="latest"
+            if [ -n "$registry_latest" ] && \
+               [ "$VERSION" != "$(printf '%s\n%s\n' "$registry_latest" "$VERSION" | sort -V | tail -1)" ]; then
+              dist_tag="backfill"
+              echo "::notice::$VERSION is older than $name@$registry_latest; publishing under dist-tag backfill"
             fi
             echo "==> npm publish $name@$VERSION (dist-tag $dist_tag)"
             npm publish "npm/packages/$pkg" --provenance --access public --tag "$dist_tag"
@@ -327,17 +334,31 @@ fi
 # deployment-branch rule is the control that keeps a dispatch of unmodified
 # YAML on a non-main ref from reaching any step in this workflow.
 actual_job_environments="$test_tmp/actual-job-environments"
+# Emit one line per job whether or not it declares an environment: a fixed
+# list of environment lines would stay green if a new job were added without
+# one, so completeness must come from the job set, not the declarations.
 awk '
-  /^  [A-Za-z0-9_-]+:[[:space:]]*$/ {
+  /^jobs:[[:space:]]*$/ {
+    in_jobs = 1
+    next
+  }
+  in_jobs && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ {
     job = $0
     sub(/^  /, "", job)
     sub(/:[[:space:]]*$/, "", job)
+    jobs[++n] = job
   }
-  /^    environment:[[:space:]]*/ {
+  in_jobs && /^    environment:[[:space:]]*/ {
     env = $0
     sub(/^    environment:[[:space:]]*/, "", env)
     gsub(/[[:space:]]/, "", env)
-    print job "=" env
+    envs[job] = env
+  }
+  END {
+    for (i = 1; i <= n; i++) {
+      j = jobs[i]
+      print j "=" ((j in envs) ? envs[j] : "MISSING")
+    }
   }
 ' "$release_workflow" > "$actual_job_environments"
 
