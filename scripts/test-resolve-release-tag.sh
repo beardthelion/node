@@ -71,7 +71,14 @@ cat > "$stub_bin/gh" <<'STUB'
 #!/usr/bin/env bash
 case "$1" in
   api)
-    printf '%s\n' "${STUB_STATUS:?STUB_STATUS unset}"
+    case "$2" in
+      */commits/*)
+        printf '%s\n' "0000000000000000000000000000000000000000"
+        ;;
+      */compare/*)
+        printf '%s\n' "${STUB_STATUS:?STUB_STATUS unset}"
+        ;;
+    esac
     ;;
   release)
     [ "${STUB_RELEASE_EXISTS:-0}" = "1" ]
@@ -279,7 +286,17 @@ job=npm-publish
           # npm publish moves the latest dist-tag to whatever it publishes, so a
           # backfilled older version would hand :latest to stale code. Publish
           # those under the backfill dist-tag instead.
-          registry_latest="$(npm view @gitlawb/gl dist-tags.latest 2>/dev/null || true)"
+          # E404 means the package has never been published, so this release
+          # gets latest; any other lookup failure must fail closed rather than
+          # guess at the dist-tag and risk moving latest backward.
+          registry_latest="$(npm view @gitlawb/gl dist-tags.latest 2>&1)" || {
+            if ! grep -q E404 <<<"$registry_latest"; then
+              printf '%s\n' "$registry_latest" >&2
+              echo "::error::npm dist-tags lookup failed; not guessing the dist-tag"
+              exit 1
+            fi
+            registry_latest=""
+          }
           dist_tag="latest"
           if [ -n "$registry_latest" ] && \
              [ "$VERSION" != "$(printf '%s\n%s\n' "$registry_latest" "$VERSION" | sort -V | tail -1)" ]; then

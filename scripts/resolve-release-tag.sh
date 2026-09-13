@@ -33,7 +33,11 @@ if [ -n "${GH_TOKEN:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ]; then
     printf '%s\n' "::error::no GitHub release exists for tag $tag"
     exit 1
   fi
-  status="$(gh api "repos/$GITHUB_REPOSITORY/compare/main...$tag" -q .status)"
+  # Resolve through the fully-qualified tag ref to a commit SHA: an
+  # unqualified name can resolve to a same-named branch and vouch for the
+  # wrong commit, the same shadowing the refs/tags/ checkout prefix avoids.
+  tag_commit="$(gh api "repos/$GITHUB_REPOSITORY/commits/refs/tags/$tag" -q .sha)"
+  status="$(gh api "repos/$GITHUB_REPOSITORY/compare/main...$tag_commit" -q .status)"
   case "$status" in
     identical|behind) ;;
     *)
