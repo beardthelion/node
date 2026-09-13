@@ -767,4 +767,39 @@ while IFS= read -r spec; do
   fi
 done < "$npm_install_specs"
 
+# A pinned install alone does not prove the pin took: the install line could
+# drift, be shadowed by a PATH entry, or install a resolved-otherwise version
+# and nothing would notice. Require, per step that installs npm, that the SAME
+# step body runs `npm --version` and compares something against the pinned
+# literal: `!= "X.Y.Z"` or `== "X.Y.Z"` outside the install spec itself. A
+# comment or error message that merely names the version cannot satisfy it,
+# and the required set derives from the workflow's own install lines, so a
+# second install elsewhere cannot ride on the first step's assertion.
+if ! awk '
+  function flush(  m, v, ev, cmp, rest) {
+    if (!in_step) return
+    m = step
+    while (match(m, /npm install -g npm@[0-9]+\.[0-9]+\.[0-9]+/)) {
+      v = substr(m, RSTART, RLENGTH)
+      sub(/^.*npm@/, "", v)
+      ev = v
+      gsub(/\./, "\\.", ev)
+      cmp = "(!=|==)[[:space:]]*\"?" ev "\"?"
+      rest = step
+      gsub(/npm install -g npm@[0-9]+\.[0-9]+\.[0-9]+/, "", rest)
+      if (index(rest, "npm --version") == 0 || rest !~ cmp) {
+        printf "step installs npm@%s without asserting the pin took\n", v \
+          > "/dev/stderr"
+        bad = 1
+      }
+      m = substr(m, RSTART + RLENGTH)
+    }
+  }
+  /^      - / { flush(); in_step = 1; step = $0 ORS; next }
+  in_step { step = step $0 ORS }
+  END { flush(); if (bad) exit 1 }
+' "$release_workflow"; then
+  exit 1
+fi
+
 printf '%s\n' "release tag validation tests passed"

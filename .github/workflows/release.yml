@@ -644,7 +644,15 @@ jobs:
         run: |
           set -euo pipefail
           npm install -g npm@11.19.1
-          npm --version
+          # Assert the pin took, so an accidental unpin or a drift off 11.19.1
+          # fails loudly here instead of silently running a different npm on
+          # the OIDC path.
+          installed="$(npm --version)"
+          echo "npm installed: $installed"
+          if [ "$installed" != "11.19.1" ]; then
+            echo "::error::npm is not the pinned 11.19.1 (got: $installed)"
+            exit 1
+          fi
 
       - name: Lay in release binaries
         env:
