@@ -20,7 +20,10 @@ on:
         type: string
 
 concurrency:
-  group: release-${{ github.ref }}
+  # Not keyed on the ref: two dispatches from different refs would otherwise
+  # interleave, and every publish step reads a registry floor it then writes
+  # past, so runs of this workflow must serialize outright.
+  group: release
   cancel-in-progress: false
 
 # Least privilege by default; every job opts in to exactly what it needs.
