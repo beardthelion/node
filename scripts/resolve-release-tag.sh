@@ -42,16 +42,27 @@ if [ -n "${GH_TOKEN:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ]; then
     exit 1
   fi
   # Same boundary for the assets the npm backfill republishes: a release
-  # asset replaced by a collaborator login is attacker-mutable content.
-  uploaders="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" \
-    -q '.assets[].uploader.login' | sort -u)"
+  # asset replaced by a collaborator login is attacker-mutable content. The
+  # captured name/id pairs go to GITHUB_OUTPUT so the download step fetches
+  # by immutable asset id; a delete+reupload between here and the download
+  # produces a new id and fails closed.
+  assets="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" \
+    -q '.assets[] | .name + " " + (.id | tostring) + " " + .uploader.login')"
+  uploaders="$(printf '%s\n' "$assets" | awk 'NF {print $3}' | sort -u)"
   if [ -n "$uploaders" ] && [ "$uploaders" != "github-actions[bot]" ]; then
     printf '%s\n' "::error::release $tag has assets not uploaded by the release automation: $uploaders"
     exit 1
   fi
+  {
+    printf '%s\n' 'assets<<GHAE'
+    printf '%s\n' "$assets" | awk 'NF {print $1, $2}'
+    printf '%s\n' 'GHAE'
+  } >> "$GITHUB_OUTPUT"
   # Resolve through the fully-qualified tag ref to a commit SHA: an
   # unqualified name can resolve to a same-named branch and vouch for the
   # wrong commit, the same shadowing the refs/tags/ checkout prefix avoids.
+  # The SHA is emitted so checkouts pin the verified commit instead of
+  # re-resolving a tag that could be moved between resolve and checkout.
   tag_commit="$(gh api "repos/$GITHUB_REPOSITORY/commits/refs/tags/$tag" -q .sha)"
   status="$(gh api "repos/$GITHUB_REPOSITORY/compare/main...$tag_commit" -q .status)"
   case "$status" in
@@ -61,6 +72,7 @@ if [ -n "${GH_TOKEN:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ]; then
       exit 1
       ;;
   esac
+  printf '%s\n' "tag_commit=$tag_commit" >> "$GITHUB_OUTPUT"
 fi
 
 printf '%s\n' "tag=$tag" >> "$GITHUB_OUTPUT"

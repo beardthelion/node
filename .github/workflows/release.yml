@@ -241,7 +241,9 @@ jobs:
       - name: Checkout release tag
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: refs/tags/${{ steps.rel.outputs.tag }}
+          # Pin the commit the resolver verified; a tag ref re-resolved here
+          # could have been moved between resolve and checkout.
+          ref: ${{ steps.rel.outputs.tag_commit || format('refs/tags/{0}', steps.rel.outputs.tag) }}
           persist-credentials: false
 
       - name: Set up Docker Buildx
@@ -581,7 +583,9 @@ jobs:
     # (release-binaries is skipped on dispatch, hence !cancelled()). Publishing
     # auth is npm Trusted Publishing (GitHub OIDC) — no NPM_TOKEN. Each
     # @gitlawb package must have this repo + workflow (release.yml) configured
-    # as its trusted publisher on npmjs.com, or publish fails loudly here —
+    # as its trusted publisher on npmjs.com, scoped to the release environment
+    # so a dispatched copy of this file on another ref cannot mint a token, or
+    # publish fails loudly here —
     # deliberately loud: the silent secret-guard skip is how 0.4.x–0.6.0
     # never reached npm.
     if: >-
@@ -613,7 +617,9 @@ jobs:
       - name: Checkout release tag
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: refs/tags/${{ steps.rel.outputs.tag }}
+          # Pin the commit the resolver verified; a tag ref re-resolved here
+          # could have been moved between resolve and checkout.
+          ref: ${{ steps.rel.outputs.tag_commit || format('refs/tags/{0}', steps.rel.outputs.tag) }}
           persist-credentials: false
 
       # npm >= 11.5.1 performs the OIDC token exchange automatically when the
@@ -634,6 +640,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ steps.rel.outputs.version }}
           TAG: ${{ steps.rel.outputs.tag }}
+          ASSETS: ${{ steps.rel.outputs.assets }}
         run: |
           set -euo pipefail
           # npm platform package -> Rust target triple (unix only; Windows is not
@@ -650,8 +657,16 @@ jobs:
             target="${entry#*:}"
             archive="gitlawb-node-${VERSION}-${target}.tar.gz"
             echo "==> $pkg <- $archive"
-            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
-              --pattern "$archive" --dir _dl --clobber
+            # Download by the asset id the resolver captured and uploader-
+            # checked, not by name: release assets are mutable, and an id can
+            # only ever point at the exact blob captured at resolve time.
+            asset_id="$(printf '%s\n' "$ASSETS" | awk -v n="$archive" '$1 == n {print $2; exit}')"
+            if [ -z "$asset_id" ]; then
+              echo "::error::release $TAG has no asset $archive captured at resolve time"
+              exit 1
+            fi
+            gh api "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" \
+              -H 'Accept: application/octet-stream' > "_dl/$archive"
             tar -xzf "_dl/$archive" -C _dl
             src="_dl/gitlawb-node-${VERSION}-${target}"
             cp "$src/gl" "npm/packages/$pkg/gl"

@@ -79,7 +79,8 @@ case "$1" in
         printf '%s\n' "${STUB_STATUS:?STUB_STATUS unset}"
         ;;
       */releases/tags/*)
-        printf '%s\n' "${STUB_UPLOADERS:-github-actions[bot]}"
+        printf 'gitlawb-node-9.9.9-x86_64-unknown-linux-musl.tar.gz 11 %s\n' \
+          "${STUB_UPLOADERS:-github-actions[bot]}"
         ;;
     esac
     ;;
@@ -104,6 +105,20 @@ run_resolver_ci() {
 
 if ! run_resolver_ci behind 1 v9.9.9; then
   printf '%s\n' "provenance: release tag reachable from main rejected" >&2
+  exit 1
+fi
+# The resolved SHA and the captured asset name/id map must reach
+# GITHUB_OUTPUT: checkouts pin the SHA, and the binary download step fetches
+# by immutable asset id.
+if ! grep -qx 'tag_commit=0000000000000000000000000000000000000000' \
+    "$test_tmp/prov-output"; then
+  printf '%s\n' "provenance: tag_commit output missing" >&2
+  exit 1
+fi
+if ! grep -q 'assets<<GHAE' "$test_tmp/prov-output" \
+    || ! grep -q 'gitlawb-node-9.9.9-x86_64-unknown-linux-musl.tar.gz 11' \
+      "$test_tmp/prov-output"; then
+  printf '%s\n' "provenance: assets output missing" >&2
   exit 1
 fi
 if ! run_resolver_ci identical 1 v9.9.9; then
@@ -134,11 +149,11 @@ actual_resolver_steps="$test_tmp/actual-resolver-steps"
 expected_resolver_steps="$test_tmp/expected-resolver-steps"
 
 # Pin each resolver step, the checkout step that supplies its script, and the
-# two steps that publish to an external registry. Any change to one of these
-# reviewed blocks must be reflected here deliberately.
+# steps that publish to an external registry or fetch the publish input. Any
+# change to one of these reviewed blocks must be reflected here deliberately.
 awk '
   function emit_step() {
-    if (in_step && (is_rel || is_workflow_scripts_checkout || is_manifest || is_npm_publish)) {
+    if (in_step && (is_rel || is_workflow_scripts_checkout || is_manifest || is_npm_publish || is_layin || is_tag_checkout)) {
       printf "job=%s\n%s", job, step
     }
     in_step = 0
@@ -146,6 +161,8 @@ awk '
     is_workflow_scripts_checkout = 0
     is_manifest = 0
     is_npm_publish = 0
+    is_layin = 0
+    is_tag_checkout = 0
     step = ""
   }
 
@@ -163,6 +180,8 @@ awk '
     is_workflow_scripts_checkout = ($0 ~ /^      - name:[[:space:]]*Check out workflow scripts[[:space:]]*$/)
     is_manifest = ($0 ~ /^      - name:[[:space:]]*Create and push multi-arch manifest[[:space:]]*$/)
     is_npm_publish = ($0 ~ /^      - name:[[:space:]]*Publish[[:space:]]*$/)
+    is_layin = ($0 ~ /^      - name:[[:space:]]*Lay in release binaries[[:space:]]*$/)
+    is_tag_checkout = ($0 ~ /^      - name:[[:space:]]*Checkout release tag[[:space:]]*$/)
     step = $0 ORS
     next
   }
@@ -200,6 +219,15 @@ job=docker
           # buildx's `--output name=` does no lowercasing — a mixed-case owner
           # makes the digest push fail with "invalid reference format".
           echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+job=docker
+      - name: Checkout release tag
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # Pin the commit the resolver verified; a tag ref re-resolved here
+          # could have been moved between resolve and checkout.
+          ref: ${{ steps.rel.outputs.tag_commit || format('refs/tags/{0}', steps.rel.outputs.tag) }}
+          persist-credentials: false
 
 job=docker-manifest
       - name: Check out workflow scripts
@@ -285,6 +313,13 @@ job=docker-manifest
           fi
           docker buildx imagetools inspect "$IMAGE:$VERSION"
 
+job=release-binaries
+      - name: Checkout release tag
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: refs/tags/${{ needs.release-please.outputs.tag_name }}
+          persist-credentials: false
+
 job=npm-publish
       - name: Check out workflow scripts
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -301,6 +336,58 @@ job=npm-publish
         run: |
           set -euo pipefail
           scripts/resolve-release-tag.sh "${DISPATCH_TAG:-$RELEASE_TAG}"
+
+job=npm-publish
+      - name: Checkout release tag
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # Pin the commit the resolver verified; a tag ref re-resolved here
+          # could have been moved between resolve and checkout.
+          ref: ${{ steps.rel.outputs.tag_commit || format('refs/tags/{0}', steps.rel.outputs.tag) }}
+          persist-credentials: false
+
+      # npm >= 11.5.1 performs the OIDC token exchange automatically when the
+      # package has a trusted publisher configured; older npm silently falls
+      # back to (absent) token auth and fails confusingly.
+job=npm-publish
+      - name: Lay in release binaries
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.rel.outputs.version }}
+          TAG: ${{ steps.rel.outputs.tag }}
+          ASSETS: ${{ steps.rel.outputs.assets }}
+        run: |
+          set -euo pipefail
+          # npm platform package -> Rust target triple (unix only; Windows is not
+          # published to npm).
+          MAP="
+          gl-darwin-arm64:aarch64-apple-darwin
+          gl-darwin-x64:x86_64-apple-darwin
+          gl-linux-arm64:aarch64-unknown-linux-musl
+          gl-linux-x64:x86_64-unknown-linux-musl
+          "
+          mkdir -p _dl
+          for entry in $MAP; do
+            pkg="${entry%%:*}"
+            target="${entry#*:}"
+            archive="gitlawb-node-${VERSION}-${target}.tar.gz"
+            echo "==> $pkg <- $archive"
+            # Download by the asset id the resolver captured and uploader-
+            # checked, not by name: release assets are mutable, and an id can
+            # only ever point at the exact blob captured at resolve time.
+            asset_id="$(printf '%s\n' "$ASSETS" | awk -v n="$archive" '$1 == n {print $2; exit}')"
+            if [ -z "$asset_id" ]; then
+              echo "::error::release $TAG has no asset $archive captured at resolve time"
+              exit 1
+            fi
+            gh api "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" \
+              -H 'Accept: application/octet-stream' > "_dl/$archive"
+            tar -xzf "_dl/$archive" -C _dl
+            src="_dl/gitlawb-node-${VERSION}-${target}"
+            cp "$src/gl" "npm/packages/$pkg/gl"
+            cp "$src/git-remote-gitlawb" "npm/packages/$pkg/git-remote-gitlawb"
+            chmod +x "npm/packages/$pkg/gl" "npm/packages/$pkg/git-remote-gitlawb"
+          done
 
 job=npm-publish
       - name: Publish
