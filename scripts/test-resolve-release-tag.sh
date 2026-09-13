@@ -180,13 +180,14 @@ expected_resolver_steps="$test_tmp/expected-resolver-steps"
 # change to one of these reviewed blocks must be reflected here deliberately.
 awk '
   function emit_step() {
-    if (in_step && (is_rel || is_workflow_scripts_checkout || is_manifest || is_npm_publish || is_layin || is_tag_checkout || is_regen)) {
+    if (in_step && (is_rel || is_workflow_scripts_checkout || is_manifest || is_moving || is_npm_publish || is_layin || is_tag_checkout || is_regen)) {
       printf "job=%s\n%s", job, step
     }
     in_step = 0
     is_rel = 0
     is_workflow_scripts_checkout = 0
     is_manifest = 0
+    is_moving = 0
     is_npm_publish = 0
     is_layin = 0
     is_tag_checkout = 0
@@ -207,6 +208,7 @@ awk '
     in_step = 1
     is_workflow_scripts_checkout = ($0 ~ /^      - name:[[:space:]]*Check out workflow scripts[[:space:]]*$/)
     is_manifest = ($0 ~ /^      - name:[[:space:]]*Create and push multi-arch manifest[[:space:]]*$/)
+    is_moving = ($0 ~ /^      - name:[[:space:]]*Move floating tags[[:space:]]*$/)
     is_npm_publish = ($0 ~ /^      - name:[[:space:]]*Publish[[:space:]]*$/)
     is_layin = ($0 ~ /^      - name:[[:space:]]*Lay in release binaries[[:space:]]*$/)
     is_tag_checkout = ($0 ~ /^      - name:[[:space:]]*Checkout release tag[[:space:]]*$/ || $0 ~ /^      - name:[[:space:]]*Checkout node \(release tag\)[[:space:]]*$/)
@@ -280,14 +282,13 @@ job=docker-manifest
 
 job=docker-manifest
       - name: Create and push multi-arch manifest
+        id: manifest
         env:
           VERSION: ${{ steps.rel.outputs.version }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           # ghcr requires a lowercase repository path.
           IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
-          MAJOR_MINOR="${VERSION%.*}"
           # The docker matrix pushes one digest per arch leg; anything else is
           # a broken set, not a smaller multi-arch image.
           count="$(find /tmp/digests -maxdepth 1 -type f | wc -l)"
@@ -310,56 +311,33 @@ job=docker-manifest
             fi
             digests="$digests $IMAGE@sha256:$d"
           done
-          # The immutable tag always publishes. Each moving tag only advances
-          # past its own floor on the registry, not GitHub's latest-release
-          # pointer, which is operator-mutable: :latest is floored at the
-          # newest X.Y.Z tag overall, and :X.Y at the newest tag in its own
-          # minor line, so a backfill that is newest in its line still moves
-          # :X.Y without touching :latest. A 404 means the package does not
-          # exist yet (first publish); any other lookup failure aborts rather
-          # than move tags on a guess.
+          # The immutable tag always publishes. The moving tags are applied by
+          # the gated step below, which never runs on workflow_dispatch.
           # shellcheck disable=SC2086
           docker buildx imagetools create -t "$IMAGE:$VERSION" $digests
-          versions_err="$(mktemp)"
-          registry_versions="$(gh api --paginate \
-            "orgs/${GITHUB_REPOSITORY_OWNER}/packages/container/${GITHUB_REPOSITORY##*/}/versions?per_page=100" \
-            -q '.[].metadata.container.tags[]' 2>"$versions_err")" || {
-            if grep -q 'HTTP 404' "$versions_err"; then
-              registry_versions=""
-            else
-              cat "$versions_err" >&2
-              echo "::error::could not list ghcr versions; not moving tags blindly"
-              exit 1
-            fi
-          }
-          rm -f "$versions_err"
-          current_max="$(printf '%s\n' "$registry_versions" \
-            | { grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' || true; } \
-            | sort -V | tail -1)"
-          # MAJOR_MINOR comes from a strictly validated vX.Y.Z tag, but escape
-          # it anyway before embedding it in a regex.
-          mm_re="$(printf '%s' "$MAJOR_MINOR" | sed 's/[^0-9]/\\&/g')"
-          line_max="$(printf '%s\n' "$registry_versions" \
-            | { grep -E "^${mm_re}\\.[0-9]+$" || true; } \
-            | sort -V | tail -1)"
-          newest="$(printf '%s\n%s\n' "${current_max:-0.0.0}" "$VERSION" | sort -V | tail -1)"
-          line_newest="$(printf '%s\n%s\n' "${line_max:-0.0.0}" "$VERSION" | sort -V | tail -1)"
-          moving=()
-          if [ "$newest" = "$VERSION" ]; then
-            moving+=(-t "$IMAGE:latest")
-          else
-            echo "::notice::$VERSION is older than registry newest $current_max; not moving :latest"
-          fi
-          if [ "$line_newest" = "$VERSION" ]; then
-            moving+=(-t "$IMAGE:$MAJOR_MINOR")
-          else
-            echo "::notice::$VERSION is older than $MAJOR_MINOR-line newest $line_max; not moving :$MAJOR_MINOR"
-          fi
-          if [ "${#moving[@]}" -gt 0 ]; then
-            # shellcheck disable=SC2086
-            docker buildx imagetools create "${moving[@]}" $digests
-          fi
           docker buildx imagetools inspect "$IMAGE:$VERSION"
+          echo "digests=${digests# }" >> "$GITHUB_OUTPUT"
+
+job=docker-manifest
+      - name: Move floating tags
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        env:
+          VERSION: ${{ steps.rel.outputs.version }}
+          DIGESTS: ${{ steps.manifest.outputs.digests }}
+        run: |
+          set -euo pipefail
+          # ghcr requires a lowercase repository path.
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
+          MAJOR_MINOR="${VERSION%.*}"
+          # :latest and :X.Y track the newest release. Only a push to main
+          # carries a release-please-cut version, and release-please versions
+          # are monotonic, so on this path the tags only ever advance. A
+          # workflow_dispatch backfill republishes an existing tag and must
+          # never move a pointer, so this step skips on dispatch. After a
+          # backfill that is genuinely newest in its minor line, advance :X.Y
+          # by hand: docker buildx imagetools create -t "$IMAGE:X.Y" <digests>.
+          # shellcheck disable=SC2086
+          docker buildx imagetools create -t "$IMAGE:latest" -t "$IMAGE:$MAJOR_MINOR" $DIGESTS
 
 job=release-binaries
       - name: Check out workflow scripts
@@ -635,6 +613,53 @@ if ! cmp "$expected_resolver_steps" "$actual_resolver_steps"; then
   printf '%s\n' \
     "release workflow resolver steps differ from the three reviewed blocks" >&2
   diff -u "$expected_resolver_steps" "$actual_resolver_steps" >&2 || true
+  exit 1
+fi
+
+# The moving-tag freeze is a structural property of the whole workflow, so it
+# must be checked over EVERY step, not only the pinned set above: an
+# imagetools call carrying :latest or :$MAJOR_MINOR relocated into an unpinned
+# step would otherwise iterate zero pinned steps and pass vacuously. Exactly
+# one step may carry that call, and it must be gated on both the event and the
+# ref: the on.push.branches trigger sits outside every pin and assertion, so
+# an event-only gate would silently widen with it. No step may read the
+# retired packages/container endpoint at all.
+if ! awk '
+  function flush(  has_call, has_guard) {
+    if (!in_step) return
+    has_call = (step ~ /imagetools create/ \
+      && step ~ /-t[[:space:]]+"\$IMAGE:(latest|\$MAJOR_MINOR)"/)
+    has_guard = (step ~ /github\.event_name == .push./ \
+      && step ~ /github\.ref == .refs\/heads\/main./)
+    if (has_call) {
+      calls++
+      if (!has_guard) ungated++
+    }
+    if (step ~ /packages\/container/) endpoint++
+  }
+  /^      - / { flush(); in_step = 1; step = $0 ORS; next }
+  in_step { step = step $0 ORS }
+  END {
+    flush()
+    ok = 1
+    if (calls != 1) {
+      printf "expected exactly one floating-tag imagetools step, found %d\n", \
+        calls > "/dev/stderr"
+      ok = 0
+    }
+    if (ungated) {
+      printf "%d floating-tag imagetools step(s) lack the push-to-main guard\n", \
+        ungated > "/dev/stderr"
+      ok = 0
+    }
+    if (endpoint) {
+      print "retired packages/container read present in a workflow step" \
+        > "/dev/stderr"
+      ok = 0
+    }
+    if (!ok) exit 1
+  }
+' "$release_workflow"; then
   exit 1
 fi
 

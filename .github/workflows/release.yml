@@ -356,14 +356,13 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create and push multi-arch manifest
+        id: manifest
         env:
           VERSION: ${{ steps.rel.outputs.version }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           # ghcr requires a lowercase repository path.
           IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
-          MAJOR_MINOR="${VERSION%.*}"
           # The docker matrix pushes one digest per arch leg; anything else is
           # a broken set, not a smaller multi-arch image.
           count="$(find /tmp/digests -maxdepth 1 -type f | wc -l)"
@@ -386,56 +385,32 @@ jobs:
             fi
             digests="$digests $IMAGE@sha256:$d"
           done
-          # The immutable tag always publishes. Each moving tag only advances
-          # past its own floor on the registry, not GitHub's latest-release
-          # pointer, which is operator-mutable: :latest is floored at the
-          # newest X.Y.Z tag overall, and :X.Y at the newest tag in its own
-          # minor line, so a backfill that is newest in its line still moves
-          # :X.Y without touching :latest. A 404 means the package does not
-          # exist yet (first publish); any other lookup failure aborts rather
-          # than move tags on a guess.
+          # The immutable tag always publishes. The moving tags are applied by
+          # the gated step below, which never runs on workflow_dispatch.
           # shellcheck disable=SC2086
           docker buildx imagetools create -t "$IMAGE:$VERSION" $digests
-          versions_err="$(mktemp)"
-          registry_versions="$(gh api --paginate \
-            "orgs/${GITHUB_REPOSITORY_OWNER}/packages/container/${GITHUB_REPOSITORY##*/}/versions?per_page=100" \
-            -q '.[].metadata.container.tags[]' 2>"$versions_err")" || {
-            if grep -q 'HTTP 404' "$versions_err"; then
-              registry_versions=""
-            else
-              cat "$versions_err" >&2
-              echo "::error::could not list ghcr versions; not moving tags blindly"
-              exit 1
-            fi
-          }
-          rm -f "$versions_err"
-          current_max="$(printf '%s\n' "$registry_versions" \
-            | { grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' || true; } \
-            | sort -V | tail -1)"
-          # MAJOR_MINOR comes from a strictly validated vX.Y.Z tag, but escape
-          # it anyway before embedding it in a regex.
-          mm_re="$(printf '%s' "$MAJOR_MINOR" | sed 's/[^0-9]/\\&/g')"
-          line_max="$(printf '%s\n' "$registry_versions" \
-            | { grep -E "^${mm_re}\\.[0-9]+$" || true; } \
-            | sort -V | tail -1)"
-          newest="$(printf '%s\n%s\n' "${current_max:-0.0.0}" "$VERSION" | sort -V | tail -1)"
-          line_newest="$(printf '%s\n%s\n' "${line_max:-0.0.0}" "$VERSION" | sort -V | tail -1)"
-          moving=()
-          if [ "$newest" = "$VERSION" ]; then
-            moving+=(-t "$IMAGE:latest")
-          else
-            echo "::notice::$VERSION is older than registry newest $current_max; not moving :latest"
-          fi
-          if [ "$line_newest" = "$VERSION" ]; then
-            moving+=(-t "$IMAGE:$MAJOR_MINOR")
-          else
-            echo "::notice::$VERSION is older than $MAJOR_MINOR-line newest $line_max; not moving :$MAJOR_MINOR"
-          fi
-          if [ "${#moving[@]}" -gt 0 ]; then
-            # shellcheck disable=SC2086
-            docker buildx imagetools create "${moving[@]}" $digests
-          fi
           docker buildx imagetools inspect "$IMAGE:$VERSION"
+          echo "digests=${digests# }" >> "$GITHUB_OUTPUT"
+
+      - name: Move floating tags
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        env:
+          VERSION: ${{ steps.rel.outputs.version }}
+          DIGESTS: ${{ steps.manifest.outputs.digests }}
+        run: |
+          set -euo pipefail
+          # ghcr requires a lowercase repository path.
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
+          MAJOR_MINOR="${VERSION%.*}"
+          # :latest and :X.Y track the newest release. Only a push to main
+          # carries a release-please-cut version, and release-please versions
+          # are monotonic, so on this path the tags only ever advance. A
+          # workflow_dispatch backfill republishes an existing tag and must
+          # never move a pointer, so this step skips on dispatch. After a
+          # backfill that is genuinely newest in its minor line, advance :X.Y
+          # by hand: docker buildx imagetools create -t "$IMAGE:X.Y" <digests>.
+          # shellcheck disable=SC2086
+          docker buildx imagetools create -t "$IMAGE:latest" -t "$IMAGE:$MAJOR_MINOR" $DIGESTS
 
       - name: Release summary
         env:
