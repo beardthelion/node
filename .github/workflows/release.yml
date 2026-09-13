@@ -822,7 +822,7 @@ jobs:
             want="$(printf '%s' "$archive" | base64 -w0)"
             asset_id="$(printf '%s\n' "$ASSETS" | awk -v n="$want" '$1 == n {print $2; exit}')"
             if [ -z "$asset_id" ]; then
-              echo "::error::release $TAG has no asset $archive captured at resolve time"
+              echo "::error::release $TAG has no asset $archive captured at resolve time" >&2
               exit 1
             fi
             gh api "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" \
