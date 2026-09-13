@@ -37,6 +37,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+    environment: release
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
@@ -78,6 +79,7 @@ jobs:
       # dispatch the release PR's head carries no check runs and the --locked
       # gate never validates it.
       actions: write
+    environment: release
     steps:
       # Prefer the fresh `pr` output when this run just created/updated the
       # release PR; otherwise fall back to querying for an open release-please
@@ -227,6 +229,7 @@ jobs:
         env:
           DISPATCH_TAG: ${{ inputs.docker_backfill_tag }}
           RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           scripts/resolve-release-tag.sh "${DISPATCH_TAG:-$RELEASE_TAG}"
@@ -325,6 +328,7 @@ jobs:
         env:
           DISPATCH_TAG: ${{ inputs.docker_backfill_tag }}
           RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           scripts/resolve-release-tag.sh "${DISPATCH_TAG:-$RELEASE_TAG}"
@@ -418,6 +422,7 @@ jobs:
     continue-on-error: ${{ startsWith(matrix.target, 'x86_64-pc-windows') }}
     permissions:
       contents: write
+    environment: release
     strategy:
       fail-fast: false
       matrix:
@@ -584,6 +589,7 @@ jobs:
         env:
           DISPATCH_TAG: ${{ inputs.npm_backfill_tag }}
           RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           scripts/resolve-release-tag.sh "${DISPATCH_TAG:-$RELEASE_TAG}"
@@ -695,6 +701,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read # GITHUB_TOKEN downloads release assets; the tap push uses HOMEBREW_TAP_PAT
+    environment: release
     steps:
       - name: Guard on secret
         id: guard
@@ -812,6 +819,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read # GITHUB_TOKEN checks out node; the web PR uses WEB_SYNC_PAT
+    environment: release
     steps:
       - name: Guard on secret
         id: guard

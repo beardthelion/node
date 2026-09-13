@@ -60,6 +60,54 @@ do
   test ! -s "$invalid_output"
 done
 
+# The resolver's provenance branch, exercised against a stubbed gh. With a
+# token present the tag must name an existing GitHub release and its commit
+# must already be reachable from main (compare status identical|behind).
+# ahead/diverged or a missing release must fail closed: a write-access user
+# could otherwise plant a vX.Y.Z tag on unreviewed content and backfill it.
+stub_bin="$test_tmp/stub-bin"
+mkdir -p "$stub_bin"
+cat > "$stub_bin/gh" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  api)
+    printf '%s\n' "${STUB_STATUS:?STUB_STATUS unset}"
+    ;;
+  release)
+    [ "${STUB_RELEASE_EXISTS:-0}" = "1" ]
+    ;;
+esac
+STUB
+chmod +x "$stub_bin/gh"
+
+run_resolver_ci() {
+  PATH="$stub_bin:$PATH" \
+  GH_TOKEN=test-token \
+  GITHUB_REPOSITORY=Gitlawb/node \
+  STUB_STATUS="$1" STUB_RELEASE_EXISTS="$2" \
+  GITHUB_OUTPUT="$test_tmp/prov-output" \
+    "$resolver" "$3" >/dev/null 2>&1
+}
+
+if ! run_resolver_ci behind 1 v9.9.9; then
+  printf '%s\n' "provenance: release tag reachable from main rejected" >&2
+  exit 1
+fi
+if ! run_resolver_ci identical 1 v9.9.9; then
+  printf '%s\n' "provenance: release tag at main tip rejected" >&2
+  exit 1
+fi
+for bad_status in ahead diverged; do
+  if run_resolver_ci "$bad_status" 1 v9.9.9; then
+    printf '%s\n' "provenance: $bad_status tag unexpectedly passed" >&2
+    exit 1
+  fi
+done
+if run_resolver_ci behind 0 v9.9.9; then
+  printf '%s\n' "provenance: tag with no GitHub release unexpectedly passed" >&2
+  exit 1
+fi
+
 release_workflow="$repo_root/.github/workflows/release.yml"
 actual_resolver_steps="$test_tmp/actual-resolver-steps"
 expected_resolver_steps="$test_tmp/expected-resolver-steps"
@@ -123,6 +171,7 @@ job=docker
         env:
           DISPATCH_TAG: ${{ inputs.docker_backfill_tag }}
           RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           scripts/resolve-release-tag.sh "${DISPATCH_TAG:-$RELEASE_TAG}"
@@ -143,6 +192,7 @@ job=docker-manifest
         env:
           DISPATCH_TAG: ${{ inputs.docker_backfill_tag }}
           RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           scripts/resolve-release-tag.sh "${DISPATCH_TAG:-$RELEASE_TAG}"
@@ -210,6 +260,7 @@ job=npm-publish
         env:
           DISPATCH_TAG: ${{ inputs.npm_backfill_tag }}
           RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           scripts/resolve-release-tag.sh "${DISPATCH_TAG:-$RELEASE_TAG}"
@@ -254,10 +305,10 @@ if ! cmp "$expected_resolver_steps" "$actual_resolver_steps"; then
   exit 1
 fi
 
-# Every job that publishes to an external registry must declare the protected
-# environment that gates it. workflow_dispatch runs the selected ref's YAML, so
-# the environment's deployment-branch rule is the control that keeps a dispatch
-# from a non-main ref out of npm and ghcr.
+# Every job declares the protected environment, not only the registry publish
+# jobs: workflow_dispatch runs the selected ref's YAML, so the environment's
+# deployment-branch rule is the control that keeps a dispatch of unmodified
+# YAML on a non-main ref from reaching any step in this workflow.
 actual_job_environments="$test_tmp/actual-job-environments"
 awk '
   /^  [A-Za-z0-9_-]+:[[:space:]]*$/ {
@@ -275,9 +326,14 @@ awk '
 
 expected_job_environments="$test_tmp/expected-job-environments"
 cat > "$expected_job_environments" <<'EOF'
+release-please=release
+sync-release-lock=release
 docker=release
 docker-manifest=release
+release-binaries=release
 npm-publish=release
+homebrew-bump=release
+web-sync=release
 EOF
 
 if ! cmp "$expected_job_environments" "$actual_job_environments"; then

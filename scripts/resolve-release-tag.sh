@@ -23,5 +23,25 @@ case "$tag" in
     ;;
 esac
 
+# Provenance, enforced only in CI where a token is present. The environment
+# gate restricts which REF a dispatch may run from; this restricts which TAG
+# the input may name: it must be a tag the release flow already published,
+# pointing at a commit main already contains. Otherwise a write-access user
+# could plant a v99.99.99 tag on unreviewed content and backfill-publish it.
+if [ -n "${GH_TOKEN:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ]; then
+  if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+    printf '%s\n' "::error::no GitHub release exists for tag $tag"
+    exit 1
+  fi
+  status="$(gh api "repos/$GITHUB_REPOSITORY/compare/main...$tag" -q .status)"
+  case "$status" in
+    identical|behind) ;;
+    *)
+      printf '%s\n' "::error::tag $tag is not reachable from main (compare: $status)"
+      exit 1
+      ;;
+  esac
+fi
+
 printf '%s\n' "tag=$tag" >> "$GITHUB_OUTPUT"
 printf '%s\n' "version=${tag#v}" >> "$GITHUB_OUTPUT"
