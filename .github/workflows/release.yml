@@ -382,13 +382,29 @@ jobs:
             digests="$digests $IMAGE@sha256:$d"
           done
           # The immutable tag always publishes. The moving tags only advance:
-          # a backfill of anything but the newest release leaves :latest and
-          # :X.Y pointing at the newer image.
+          # the floor is the newest X.Y.Z tag already on the registry, not
+          # GitHub's latest-release pointer, which is operator-mutable. A 404
+          # means the package does not exist yet (first publish); any other
+          # lookup failure aborts rather than move :latest on a guess.
           # shellcheck disable=SC2086
           docker buildx imagetools create -t "$IMAGE:$VERSION" $digests
-          latest_tag="$(gh release view --json tagName -q .tagName)"
-          latest_version="${latest_tag#v}"
-          newest="$(printf '%s\n%s\n' "$latest_version" "$VERSION" | sort -V | tail -1)"
+          versions_err="$(mktemp)"
+          registry_versions="$(gh api --paginate \
+            "orgs/${GITHUB_REPOSITORY_OWNER}/packages/container/${GITHUB_REPOSITORY##*/}/versions?per_page=100" \
+            -q '.[].metadata.container.tags[]' 2>"$versions_err")" || {
+            if grep -q 'HTTP 404' "$versions_err"; then
+              registry_versions=""
+            else
+              cat "$versions_err" >&2
+              echo "::error::could not list ghcr versions; not moving tags blindly"
+              exit 1
+            fi
+          }
+          rm -f "$versions_err"
+          current_max="$(printf '%s\n' "$registry_versions" \
+            | { grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' || true; } \
+            | sort -V | tail -1)"
+          newest="$(printf '%s\n%s\n' "${current_max:-0.0.0}" "$VERSION" | sort -V | tail -1)"
           if [ "$newest" = "$VERSION" ]; then
             # shellcheck disable=SC2086
             docker buildx imagetools create \
@@ -396,7 +412,7 @@ jobs:
               -t "$IMAGE:latest" \
               $digests
           else
-            echo "::notice::$VERSION is older than $latest_tag; not moving :$MAJOR_MINOR or :latest"
+            echo "::notice::$VERSION is older than registry newest $current_max; not moving :$MAJOR_MINOR or :latest"
           fi
           docker buildx imagetools inspect "$IMAGE:$VERSION"
 
