@@ -802,4 +802,53 @@ if ! awk '
   exit 1
 fi
 
+# Once a job's resolver step (id: rel) has run, later steps must consume the
+# resolver's outputs, not needs.release-please.outputs.version/tag_name: the
+# resolver is the boundary that proved the tag, and a second derivation of the
+# same value can drift from what was verified. The rel step itself may read
+# tag_name as its RELEASE_TAG input. The job set derives from which jobs
+# actually carry a rel step.
+stale_reads="$test_tmp/stale-release-please-reads"
+awk '
+  function flush(  n, L, name, i) {
+    if (!in_step) return
+    if (step ~ /\n        id:[[:space:]]*rel[[:space:]]*\n/) {
+      rel_job[job] = 1
+      return
+    }
+    n = split(step, L, "\n")
+    name = L[1]
+    for (i = 2; i <= n; i++) {
+      if (L[i] ~ /needs\.release-please\.outputs\.(version|tag_name)/) {
+        flagged[++nf] = job " :: " name " :: " L[i]
+        flag_job[nf] = job
+      }
+    }
+  }
+  /^  [A-Za-z0-9_-]+:[[:space:]]*$/ {
+    flush()
+    job = $0
+    sub(/^  /, "", job)
+    sub(/:[[:space:]]*$/, "", job)
+    in_step = 0
+    next
+  }
+  /^      - / { flush(); in_step = 1; step = $0 ORS; next }
+  in_step { step = step $0 ORS }
+  END {
+    flush()
+    for (i = 1; i <= nf; i++) {
+      if (flag_job[i] in rel_job) print flagged[i]
+    }
+  }
+' "$release_workflow" > "$stale_reads"
+
+if [ -s "$stale_reads" ]; then
+  printf '%s\n' \
+    "post-resolve steps read release-please outputs instead of the resolver's:" \
+    >&2
+  cat "$stale_reads" >&2
+  exit 1
+fi
+
 printf '%s\n' "release tag validation tests passed"

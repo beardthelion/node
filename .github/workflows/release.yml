@@ -520,7 +520,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          VERSION="${{ needs.release-please.outputs.version }}"
+          VERSION="${{ steps.rel.outputs.version }}"
           BIN_DIR="target/${{ matrix.target }}/release"
           EXE=""
           case "${{ matrix.target }}" in *windows*) EXE=".exe" ;; esac
@@ -540,7 +540,7 @@ jobs:
         run: |
           set -euo pipefail
           TARGET="${{ matrix.target }}"
-          NAME="gitlawb-node-${{ needs.release-please.outputs.version }}-${TARGET}"
+          NAME="gitlawb-node-${{ steps.rel.outputs.version }}-${TARGET}"
           BIN_DIR="target/${TARGET}/release"
           EXE=""
           case "$TARGET" in *windows*) EXE=".exe" ;; esac
@@ -581,7 +581,7 @@ jobs:
       - name: Attach to release
         uses: softprops/action-gh-release@72f2c25fcb47643c292f7107632f7a47c1df5cd8 # v2.3.2
         with:
-          tag_name: ${{ needs.release-please.outputs.tag_name }}
+          tag_name: ${{ steps.rel.outputs.tag }}
           files: |
             dist/*.tar.gz
             dist/*.zip
@@ -889,7 +889,7 @@ jobs:
         working-directory: tap
         env:
           HOMEBREW_TAP_PAT: ${{ secrets.HOMEBREW_TAP_PAT }}
-          VERSION: ${{ needs.release-please.outputs.version }}
+          VERSION: ${{ steps.rel.outputs.version }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
@@ -967,8 +967,8 @@ jobs:
         if: ${{ steps.guard.outputs.enabled == 'true' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ needs.release-please.outputs.version }}
-          TAG: ${{ needs.release-please.outputs.tag_name }}
+          VERSION: ${{ steps.rel.outputs.version }}
+          TAG: ${{ steps.rel.outputs.tag }}
         run: |
           set -euo pipefail
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
@@ -986,8 +986,8 @@ jobs:
         if: ${{ steps.guard.outputs.enabled == 'true' }}
         env:
           GH_TOKEN: ${{ secrets.WEB_SYNC_PAT }}
-          VERSION: ${{ needs.release-please.outputs.version }}
-          TAG: ${{ needs.release-please.outputs.tag_name }}
+          VERSION: ${{ steps.rel.outputs.version }}
+          TAG: ${{ steps.rel.outputs.tag }}
         run: |
           set -euo pipefail
           # Canonical install scripts (source of truth lives in the node repo).
