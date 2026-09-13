@@ -20,9 +20,14 @@ on:
         type: string
 
 concurrency:
-  # Not keyed on the ref: two dispatches from different refs would otherwise
-  # interleave, and every publish step reads a registry floor it then writes
-  # past, so runs of this workflow must serialize outright.
+  # Not keyed on the ref: two runs racing `imagetools create` on the same
+  # moving tags could interleave, so runs of this workflow serialize outright.
+  # GitHub keeps at most one running and one pending run per group; a newer
+  # queued run replaces the pending one, and cancel-in-progress: false
+  # protects only the run already executing. So a backfill dispatched while a
+  # release is running, followed by a push to main, is replaced silently: the
+  # remedy is to re-dispatch it once the running release completes, which the
+  # push-only gate on the moving-tag step makes safe in any ordering.
   group: release
   cancel-in-progress: false
 
