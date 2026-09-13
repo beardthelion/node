@@ -14825,19 +14825,31 @@ mod tests {
             "{route} on a held private-repo bounty id must deny as 404, not a \
              distinguishable status/participant error"
         );
-        let msg = json_body(resp).await;
-        assert!(
-            msg["message"].as_str().unwrap_or("").contains("not found"),
-            "{route} denial body must be the not-found shape, got {msg}"
-        );
+        let held_body = json_body(resp).await;
 
-        // Absent id: the control case, already 404 today.
+        // Absent id: the control case. The body must carry the same not_found
+        // shape so a denial discloses nothing beyond the caller-supplied id.
         let absent_uri = format!("/api/v1/bounties/b341-no-such-id/{route}");
         let resp = router
             .oneshot(signed_bounty_post(&stranger, &absent_uri, body))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let absent_body = json_body(resp).await;
+
+        for (id, got) in [
+            ("b341-held-id", &held_body),
+            ("b341-no-such-id", &absent_body),
+        ] {
+            assert_eq!(
+                *got,
+                serde_json::json!({
+                    "error": "not_found",
+                    "message": format!("bounty {id} not found"),
+                }),
+                "{route} denial body for {id} must be the bare not-found shape, got {got}"
+            );
+        }
     }
 
     #[sqlx::test]
