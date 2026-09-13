@@ -78,6 +78,9 @@ case "$1" in
       */compare/*)
         printf '%s\n' "${STUB_STATUS:?STUB_STATUS unset}"
         ;;
+      */releases/tags/*)
+        printf '%s\n' "${STUB_UPLOADERS:-github-actions[bot]}"
+        ;;
     esac
     ;;
   release)
@@ -94,6 +97,7 @@ run_resolver_ci() {
   GITHUB_REPOSITORY=Gitlawb/node \
   STUB_STATUS="$1" STUB_RELEASE_EXISTS="$2" \
   STUB_RELEASE_AUTHOR="${4:-github-actions[bot]}" \
+  STUB_UPLOADERS="${5:-github-actions[bot]}" \
   GITHUB_OUTPUT="$test_tmp/prov-output" \
     "$resolver" "$3" >/dev/null 2>&1
 }
@@ -118,6 +122,10 @@ if run_resolver_ci behind 0 v9.9.9; then
 fi
 if run_resolver_ci behind 1 v9.9.9 collaborator; then
   printf '%s\n' "provenance: hand-created release unexpectedly passed" >&2
+  exit 1
+fi
+if run_resolver_ci behind 1 v9.9.9 "github-actions[bot]" collaborator; then
+  printf '%s\n' "provenance: release with collaborator-uploaded assets unexpectedly passed" >&2
   exit 1
 fi
 

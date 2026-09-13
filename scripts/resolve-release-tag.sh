@@ -41,6 +41,14 @@ if [ -n "${GH_TOKEN:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ]; then
     printf '%s\n' "::error::release $tag was authored by $release_author, not the release automation"
     exit 1
   fi
+  # Same boundary for the assets the npm backfill republishes: a release
+  # asset replaced by a collaborator login is attacker-mutable content.
+  uploaders="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" \
+    -q '.assets[].uploader.login' | sort -u)"
+  if [ -n "$uploaders" ] && [ "$uploaders" != "github-actions[bot]" ]; then
+    printf '%s\n' "::error::release $tag has assets not uploaded by the release automation: $uploaders"
+    exit 1
+  fi
   # Resolve through the fully-qualified tag ref to a commit SHA: an
   # unqualified name can resolve to a same-named branch and vouch for the
   # wrong commit, the same shadowing the refs/tags/ checkout prefix avoids.
