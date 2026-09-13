@@ -677,7 +677,9 @@ jobs:
             # Download by the asset id the resolver captured and uploader-
             # checked, not by name: release assets are mutable, and an id can
             # only ever point at the exact blob captured at resolve time.
-            asset_id="$(printf '%s\n' "$ASSETS" | awk -v n="$archive" '$1 == n {print $2; exit}')"
+            # The map keys are base64-encoded asset names.
+            want="$(printf '%s' "$archive" | base64 -w0)"
+            asset_id="$(printf '%s\n' "$ASSETS" | awk -v n="$want" '$1 == n {print $2; exit}')"
             if [ -z "$asset_id" ]; then
               echo "::error::release $TAG has no asset $archive captured at resolve time"
               exit 1
@@ -815,7 +817,8 @@ jobs:
           # release assets too; trusting them would trust the same surface.
           sha() {
             archive="gitlawb-node-${VERSION}-$1.tar.gz"
-            asset_id="$(printf '%s\n' "$ASSETS" | awk -v n="$archive" '$1 == n {print $2; exit}')"
+            want="$(printf '%s' "$archive" | base64 -w0)"
+            asset_id="$(printf '%s\n' "$ASSETS" | awk -v n="$want" '$1 == n {print $2; exit}')"
             if [ -z "$asset_id" ]; then
               echo "::error::release $TAG has no asset $archive captured at resolve time"
               exit 1

@@ -79,8 +79,17 @@ case "$1" in
         printf '%s\n' "${STUB_STATUS:?STUB_STATUS unset}"
         ;;
       */releases/tags/*)
-        printf 'gitlawb-node-9.9.9-x86_64-unknown-linux-musl.tar.gz 11 %s\n' \
+        # Emitted as base64(name) id uploader, matching the resolver's jq.
+        printf '%s 11 %s\n' \
+          "$(printf '%s' 'gitlawb-node-9.9.9-x86_64-unknown-linux-musl.tar.gz' | base64 -w0)" \
           "${STUB_UPLOADERS:-github-actions[bot]}"
+        # STUB_EVIL_NAME simulates an attacker-crafted asset name carrying a
+        # fake uploader inside it; base64 keeps it a single first field and
+        # the real uploader stays in $3.
+        if [ "${STUB_EVIL_NAME:-0}" = "1" ]; then
+          printf '%s 999 collaborator\n' \
+            "$(printf '%s' 'gitlawb-node-9.9.9-x86_64-unknown-linux-musl.tar.gz 999 github-actions[bot]' | base64 -w0)"
+        fi
         ;;
     esac
     ;;
@@ -102,6 +111,7 @@ run_resolver_ci() {
   STUB_RELEASE_AUTHOR="${4:-github-actions[bot]}" \
   STUB_UPLOADERS="${5:-github-actions[bot]}" \
   STUB_TARGET="${6:-0000000000000000000000000000000000000000}" \
+  STUB_EVIL_NAME="${STUB_EVIL_NAME:-0}" \
   GITHUB_OUTPUT="$test_tmp/prov-output" \
     "$resolver" "$3" >/dev/null 2>&1
 }
@@ -118,9 +128,9 @@ if ! grep -qx 'tag_commit=0000000000000000000000000000000000000000' \
   printf '%s\n' "provenance: tag_commit output missing" >&2
   exit 1
 fi
+want_b64="$(printf '%s' 'gitlawb-node-9.9.9-x86_64-unknown-linux-musl.tar.gz' | base64 -w0)"
 if ! grep -q 'assets<<GHAE' "$test_tmp/prov-output" \
-    || ! grep -q 'gitlawb-node-9.9.9-x86_64-unknown-linux-musl.tar.gz 11' \
-      "$test_tmp/prov-output"; then
+    || ! grep -qx "$want_b64 11" "$test_tmp/prov-output"; then
   printf '%s\n' "provenance: assets output missing" >&2
   exit 1
 fi
@@ -152,6 +162,12 @@ if run_resolver_ci behind 1 v9.9.9 \
     "github-actions[bot]" "github-actions[bot]" \
     aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; then
   printf '%s\n' "provenance: moved tag unexpectedly passed" >&2
+  exit 1
+fi
+# A crafted asset name smuggling a fake uploader string: the real uploader
+# stays in the third field once names are base64-encoded.
+if STUB_EVIL_NAME=1 run_resolver_ci behind 1 v9.9.9; then
+  printf '%s\n' "provenance: crafted asset name unexpectedly passed" >&2
   exit 1
 fi
 
@@ -410,7 +426,9 @@ job=npm-publish
             # Download by the asset id the resolver captured and uploader-
             # checked, not by name: release assets are mutable, and an id can
             # only ever point at the exact blob captured at resolve time.
-            asset_id="$(printf '%s\n' "$ASSETS" | awk -v n="$archive" '$1 == n {print $2; exit}')"
+            # The map keys are base64-encoded asset names.
+            want="$(printf '%s' "$archive" | base64 -w0)"
+            asset_id="$(printf '%s\n' "$ASSETS" | awk -v n="$want" '$1 == n {print $2; exit}')"
             if [ -z "$asset_id" ]; then
               echo "::error::release $TAG has no asset $archive captured at resolve time"
               exit 1
@@ -501,7 +519,8 @@ job=homebrew-bump
           # release assets too; trusting them would trust the same surface.
           sha() {
             archive="gitlawb-node-${VERSION}-$1.tar.gz"
-            asset_id="$(printf '%s\n' "$ASSETS" | awk -v n="$archive" '$1 == n {print $2; exit}')"
+            want="$(printf '%s' "$archive" | base64 -w0)"
+            asset_id="$(printf '%s\n' "$ASSETS" | awk -v n="$want" '$1 == n {print $2; exit}')"
             if [ -z "$asset_id" ]; then
               echo "::error::release $TAG has no asset $archive captured at resolve time"
               exit 1

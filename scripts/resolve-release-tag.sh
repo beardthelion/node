@@ -48,9 +48,11 @@ if [ -n "${GH_TOKEN:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ]; then
   # asset replaced by a collaborator login is attacker-mutable content. The
   # captured name/id pairs go to GITHUB_OUTPUT so the download step fetches
   # by immutable asset id; a delete+reupload between here and the download
-  # produces a new id and fails closed.
+  # produces a new id and fails closed. Names are emitted base64-encoded:
+  # an asset name is attacker-controlled text, and whitespace in it would
+  # otherwise let a crafted name shift the positional fields.
   assets="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" \
-    -q '.assets[] | .name + " " + (.id | tostring) + " " + .uploader.login')"
+    -q '.assets[] | (.name | @base64) + " " + (.id | tostring) + " " + .uploader.login')"
   uploaders="$(printf '%s\n' "$assets" | awk 'NF {print $3}' | sort -u)"
   if [ -n "$uploaders" ] && [ "$uploaders" != "github-actions[bot]" ]; then
     printf '%s\n' "::error::release $tag has assets not uploaded by the release automation: $uploaders"
