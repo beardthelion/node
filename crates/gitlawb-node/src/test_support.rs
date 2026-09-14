@@ -3754,7 +3754,7 @@ mod tests {
         let m = server
             .mock("POST", mockito::Matcher::Regex(r"^/api/v0/add".to_string()))
             .with_status(200)
-            .with_body(r#"{"Hash":"bafyshouldnothappen"}"#)
+            .with_body(r#"{"Hash":"bafkreifjjcie6lypi6ny7amxnfftagclbuxndqonfipmb64f2km2devei4"}"#)
             .expect(0)
             .create_async()
             .await;
@@ -3880,7 +3880,7 @@ mod tests {
         let m = server
             .mock("POST", mockito::Matcher::Regex(r"^/api/v0/add".to_string()))
             .with_status(200)
-            .with_body(r#"{"Hash":"bafyshouldnothappen"}"#)
+            .with_body(r#"{"Hash":"bafkreifjjcie6lypi6ny7amxnfftagclbuxndqonfipmb64f2km2devei4"}"#)
             .expect(0)
             .create_async()
             .await;
@@ -4070,7 +4070,7 @@ mod tests {
         let m = server
             .mock("POST", mockito::Matcher::Regex(r"^/api/v0/add".to_string()))
             .with_status(200)
-            .with_body(r#"{"Hash":"bafyshouldnothappen"}"#)
+            .with_body(r#"{"Hash":"bafkreifjjcie6lypi6ny7amxnfftagclbuxndqonfipmb64f2km2devei4"}"#)
             .expect(0)
             .create_async()
             .await;
@@ -5890,7 +5890,7 @@ mod tests {
         let m = server
             .mock("POST", mockito::Matcher::Regex(r"^/api/v0/add".to_string()))
             .with_status(200)
-            .with_body(r#"{"Hash":"bafyprovtest"}"#)
+            .with_body(r#"{"Hash":"bafkreifjjcie6lypi6ny7amxnfftagclbuxndqonfipmb64f2km2devei4"}"#)
             .expect_at_least(1)
             .create_async()
             .await;
@@ -5950,7 +5950,7 @@ mod tests {
         let m = server
             .mock("POST", mockito::Matcher::Regex(r"^/api/v0/add".to_string()))
             .with_status(200)
-            .with_body(r#"{"Hash":"bafyproviderhash"}"#)
+            .with_body(r#"{"Hash":"bafkreifjjcie6lypi6ny7amxnfftagclbuxndqonfipmb64f2km2devei4"}"#)
             .expect(2)
             .create_async()
             .await;
@@ -6209,7 +6209,7 @@ mod tests {
         let m = server
             .mock("POST", mockito::Matcher::Regex(r"^/api/v0/add".to_string()))
             .with_status(200)
-            .with_body(r#"{"Hash":"bafyshouldnothappen"}"#)
+            .with_body(r#"{"Hash":"bafkreifjjcie6lypi6ny7amxnfftagclbuxndqonfipmb64f2km2devei4"}"#)
             .expect(0)
             .create_async()
             .await;
@@ -6332,7 +6332,7 @@ mod tests {
         let m = server
             .mock("POST", mockito::Matcher::Regex(r"^/api/v0/add".to_string()))
             .with_status(200)
-            .with_body(r#"{"Hash":"bafyshouldnothappen"}"#)
+            .with_body(r#"{"Hash":"bafkreifjjcie6lypi6ny7amxnfftagclbuxndqonfipmb64f2km2devei4"}"#)
             .expect(0)
             .create_async()
             .await;
@@ -6434,7 +6434,7 @@ mod tests {
         let m = server
             .mock("POST", mockito::Matcher::Regex(r"^/api/v0/add".to_string()))
             .with_status(200)
-            .with_body(r#"{"Hash":"x"}"#)
+            .with_body(r#"{"Hash":"bafkreifjjcie6lypi6ny7amxnfftagclbuxndqonfipmb64f2km2devei4"}"#)
             .expect(0)
             .create_async()
             .await;
@@ -6498,7 +6498,7 @@ mod tests {
         server
             .mock("POST", mockito::Matcher::Regex(r"^/api/v0/add".to_string()))
             .with_status(200)
-            .with_body(r#"{"Hash":"x"}"#)
+            .with_body(r#"{"Hash":"bafkreifjjcie6lypi6ny7amxnfftagclbuxndqonfipmb64f2km2devei4"}"#)
             .expect(0)
             .create_async()
             .await;
@@ -15689,7 +15689,9 @@ mod tests {
             let _m = server
                 .mock("POST", mockito::Matcher::Regex(r"^/api/v0/add".to_string()))
                 .with_status(200)
-                .with_body(r#"{"Hash":"bafyprovider"}"#)
+                .with_body(
+                    r#"{"Hash":"bafkreifjjcie6lypi6ny7amxnfftagclbuxndqonfipmb64f2km2devei4"}"#,
+                )
                 .expect_at_least(1)
                 .create_async()
                 .await;
@@ -15757,7 +15759,9 @@ mod tests {
             let _m = server
                 .mock("POST", mockito::Matcher::Regex(r"^/api/v0/add".to_string()))
                 .with_status(200)
-                .with_body(r#"{"Hash":"bafyprovider"}"#)
+                .with_body(
+                    r#"{"Hash":"bafkreifjjcie6lypi6ny7amxnfftagclbuxndqonfipmb64f2km2devei4"}"#,
+                )
                 .expect_at_least(1)
                 .create_async()
                 .await;
@@ -15825,7 +15829,9 @@ mod tests {
             let _m = server
                 .mock("POST", mockito::Matcher::Regex(r"^/api/v0/add".to_string()))
                 .with_status(200)
-                .with_body(r#"{"Hash":"bafyprovider"}"#)
+                .with_body(
+                    r#"{"Hash":"bafkreifjjcie6lypi6ny7amxnfftagclbuxndqonfipmb64f2km2devei4"}"#,
+                )
                 .expect_at_least(1)
                 .create_async()
                 .await;
@@ -15895,7 +15901,9 @@ mod tests {
             let _m = server
                 .mock("POST", mockito::Matcher::Regex(r"^/api/v0/add".to_string()))
                 .with_status(200)
-                .with_body(r#"{"Hash":"bafyprovider"}"#)
+                .with_body(
+                    r#"{"Hash":"bafkreifjjcie6lypi6ny7amxnfftagclbuxndqonfipmb64f2km2devei4"}"#,
+                )
                 .expect_at_least(1)
                 .create_async()
                 .await;
@@ -16018,7 +16026,9 @@ mod tests {
                 let _m = server
                     .mock("POST", mockito::Matcher::Regex(r"^/api/v0/add".to_string()))
                     .with_status(200)
-                    .with_body(r#"{"Hash":"bafyprovider"}"#)
+                    .with_body(
+                        r#"{"Hash":"bafkreifjjcie6lypi6ny7amxnfftagclbuxndqonfipmb64f2km2devei4"}"#,
+                    )
                     .expect_at_least(1)
                     .create_async()
                     .await;
@@ -16080,7 +16090,9 @@ mod tests {
                 let _m = server
                     .mock("POST", mockito::Matcher::Regex(r"^/api/v0/add".to_string()))
                     .with_status(200)
-                    .with_body(r#"{"Hash":"bafyprovider"}"#)
+                    .with_body(
+                        r#"{"Hash":"bafkreifjjcie6lypi6ny7amxnfftagclbuxndqonfipmb64f2km2devei4"}"#,
+                    )
                     .expect_at_least(1)
                     .create_async()
                     .await;
@@ -16217,7 +16229,9 @@ mod tests {
                 let _m = server
                     .mock("POST", mockito::Matcher::Regex(r"^/api/v0/add".to_string()))
                     .with_status(200)
-                    .with_body(r#"{"Hash":"bafyprovider"}"#)
+                    .with_body(
+                        r#"{"Hash":"bafkreifjjcie6lypi6ny7amxnfftagclbuxndqonfipmb64f2km2devei4"}"#,
+                    )
                     .expect_at_least(1)
                     .create_async()
                     .await;
@@ -16296,7 +16310,9 @@ mod tests {
                 let _m = server
                     .mock("POST", mockito::Matcher::Regex(r"^/api/v0/add".to_string()))
                     .with_status(200)
-                    .with_body(r#"{"Hash":"bafyprovider"}"#)
+                    .with_body(
+                        r#"{"Hash":"bafkreifjjcie6lypi6ny7amxnfftagclbuxndqonfipmb64f2km2devei4"}"#,
+                    )
                     .expect_at_least(1)
                     .create_async()
                     .await;
@@ -16357,7 +16373,9 @@ mod tests {
                 let _m = server
                     .mock("POST", mockito::Matcher::Regex(r"^/api/v0/add".to_string()))
                     .with_status(200)
-                    .with_body(r#"{"Hash":"bafyprovider"}"#)
+                    .with_body(
+                        r#"{"Hash":"bafkreifjjcie6lypi6ny7amxnfftagclbuxndqonfipmb64f2km2devei4"}"#,
+                    )
                     .expect_at_least(1)
                     .create_async()
                     .await;
@@ -16456,7 +16474,9 @@ mod tests {
                 let _m = server
                     .mock("POST", mockito::Matcher::Regex(r"^/api/v0/add".to_string()))
                     .with_status(200)
-                    .with_body(r#"{"Hash":"bafyprovider"}"#)
+                    .with_body(
+                        r#"{"Hash":"bafkreifjjcie6lypi6ny7amxnfftagclbuxndqonfipmb64f2km2devei4"}"#,
+                    )
                     .expect_at_least(1)
                     .create_async()
                     .await;
@@ -16542,7 +16562,9 @@ mod tests {
                 let _m = server
                     .mock("POST", mockito::Matcher::Regex(r"^/api/v0/add".to_string()))
                     .with_status(200)
-                    .with_body(r#"{"Hash":"bafyprovider"}"#)
+                    .with_body(
+                        r#"{"Hash":"bafkreifjjcie6lypi6ny7amxnfftagclbuxndqonfipmb64f2km2devei4"}"#,
+                    )
                     .expect_at_least(1)
                     .create_async()
                     .await;
