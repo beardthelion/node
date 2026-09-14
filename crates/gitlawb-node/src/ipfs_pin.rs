@@ -1549,6 +1549,11 @@ pub async fn pin_git_object(
                 body
             )
         })?;
+    // The string still has to be a CID. A garbage Hash would be recorded and
+    // later cat-ed the same way a missing one was, so reject it here.
+    Cid::from_str(&cid).map_err(|e| {
+        anyhow::anyhow!("IPFS /api/v0/add returned a Hash that is not a CID ({cid}): {e}")
+    })?;
 
     tracing::debug!(sha256 = %sha256_hex, %cid, "pinned git object to IPFS");
     Ok(cid)
@@ -2378,6 +2383,24 @@ mod tests {
         assert!(
             result.is_err(),
             "a 200 without a Hash must be an add failure, not a fabricated CID: {result:?}"
+        );
+    }
+
+    /// A Hash that is a string but not a CID must also fail. It would be
+    /// recorded into `encrypted_blobs.cid` and every later cat would miss.
+    #[tokio::test]
+    async fn pin_git_object_rejects_a_malformed_hash() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("POST", mockito::Matcher::Regex(r"^/api/v0/add".to_string()))
+            .with_status(200)
+            .with_body(r#"{"Hash":"not-a-cid","Size":"19"}"#)
+            .create_async()
+            .await;
+        let result = pin_git_object(&server.url(), "deadbeef", b"some object bytes\n", None).await;
+        assert!(
+            result.is_err(),
+            "a Hash that is not a CID must be an add failure: {result:?}"
         );
     }
 
