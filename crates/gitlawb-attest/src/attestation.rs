@@ -202,6 +202,17 @@ fn verifying_key_from_did_key(did: &str) -> Result<VerifyingKey> {
             "did:key must use base58btc (z-prefix): {did}"
         )));
     }
+    // Refuse an oversized id before decoding. base58 decoding is quadratic
+    // in its input, and this string comes from an untrusted artifact. An
+    // ed25519 did:key method-id is a fixed 48 characters, so this bound is
+    // slack rather than a behavior change, and it has to sit ahead of the
+    // decode to be worth anything.
+    const MAX_METHOD_ID_LEN: usize = 64;
+    if method_id.len() > MAX_METHOD_ID_LEN {
+        return Err(Error::Did(
+            "did:key method-specific id too long".to_string(),
+        ));
+    }
     let (base, bytes) =
         multibase::decode(method_id).map_err(|e| Error::Did(format!("multibase: {e}")))?;
     if base != multibase::Base::Base58Btc {
@@ -463,6 +474,23 @@ mod tests {
         );
         let err = att.verify_signature(sample_cert_hash()).unwrap_err();
         assert!(matches!(err, Error::Did(_)));
+    }
+
+    #[test]
+    fn verify_rejects_oversized_method_id_before_decoding() {
+        let sk = fresh();
+        let mut att = dummy_attestation(&sk, sample_cert_hash());
+        // A well-formed prefix on an absurdly long id must fail the length
+        // bound, not the decoder: base58 decode cost is quadratic in input
+        // length, so reaching it at all is the defect.
+        att.signer = format!("did:key:z{}", "1".repeat(256));
+        let err = att.verify_signature(sample_cert_hash()).unwrap_err();
+        // Match the bound's own message: any other Did error (a decode or
+        // length mismatch downstream) means the oversized input was decoded.
+        match err {
+            Error::Did(m) => assert!(m.contains("too long"), "unexpected: {m}"),
+            e => panic!("expected Error::Did, got {e:?}"),
+        }
     }
 
     #[test]
