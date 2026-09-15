@@ -3500,6 +3500,7 @@ dependencies = [
  "dirs",
  "gitlawb-core",
  "icaptcha-client",
+ "libc",
  "mockito",
  "reqwest",
  "serde",
