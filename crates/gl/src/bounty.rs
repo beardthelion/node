@@ -247,7 +247,7 @@ async fn cmd_list(
                 let title = b["title"].as_str().unwrap_or("?");
                 let amount = b["amount"].as_i64().unwrap_or(0);
                 let st = b["status"].as_str().unwrap_or("?");
-                let short_id = &id[..8.min(id.len())];
+                let short_id = crate::text::truncate(id, 8);
                 println!("{short_id}  {st:<10}  {amount:>12} $GITLAWB  {title}");
             }
         }
